@@ -1,0 +1,5 @@
+PATCH0104_29_3-STREAMING-THROUGHPUT
+
+PATCH0108: remove chave duplicada 'signal' no fallback chat().
+
+PATCH0200_SUMMIT_RELEASE: Consolidated Summit web hardening (same-origin /__api proxy for Railway, SSE retry/backoff+anti-zombie, capacity modal with safe-wait messaging).
