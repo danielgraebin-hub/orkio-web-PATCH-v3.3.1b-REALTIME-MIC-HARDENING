@@ -26,7 +26,12 @@ function normalizeBase(url) {
 
 function resolveApiBase() {
   const envBase = normalizeBase(
-    ORKIO_ENV.VITE_API_BASE_URL || import.meta.env.VITE_API_BASE_URL || ""
+    ORKIO_ENV.VITE_API_BASE_URL ||
+    ORKIO_ENV.VITE_API_URL ||
+    ORKIO_ENV.API_BASE_URL ||
+    import.meta.env.VITE_API_BASE_URL ||
+    import.meta.env.VITE_API_URL ||
+    ""
   );
 
   // v3.3.1d — NETWORK HARDENING
@@ -82,6 +87,12 @@ async function saveOnboarding(payload, token, org) {
 
   if (!res.ok) {
     const msg = await readErrorMessage(res);
+    const currentOrigin = typeof window !== "undefined" ? window.location?.origin || "" : "";
+    if (res.status === 405 && url.startsWith(currentOrigin)) {
+      throw new Error(
+        "Onboarding endpoint is not available on the web service. Configure VITE_API_BASE_URL / VITE_API_URL to point to the real API service."
+      );
+    }
     throw new Error(msg || `Onboarding failed (${res.status})`);
   }
 
