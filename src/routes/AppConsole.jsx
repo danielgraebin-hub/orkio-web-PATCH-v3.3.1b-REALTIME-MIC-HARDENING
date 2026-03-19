@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch, uploadFile, chat, chatStream, transcribeAudio, requestFounderHandoff, getRealtimeClientSecret, startRealtimeSession, startSummitSession, postRealtimeEventsBatch, endRealtimeSession, getRealtimeSession, getSummitSessionScore, submitSummitSessionReview, downloadRealtimeAta as downloadRealtimeAtaFile, guardRealtimeTranscript, getMe } from "../ui/api.js";
+import { apiFetch, uploadFile, chat, chatStream, transcribeAudio, requestFounderHandoff, getRealtimeClientSecret as apiGetRealtimeClientSecret, startRealtimeSession as apiStartRealtimeSession, startSummitSession as apiStartSummitSession, postRealtimeEventsBatch as apiPostRealtimeEventsBatch, endRealtimeSession as apiEndRealtimeSession, getRealtimeSession as apiGetRealtimeSession, getSummitSessionScore as apiGetSummitSessionScore, submitSummitSessionReview as apiSubmitSummitSessionReview, downloadRealtimeAta as downloadRealtimeAtaFile, guardRealtimeTranscript as apiGuardRealtimeTranscript, getMe } from "../ui/api.js";
 import { clearSession, getTenant, getToken, getUser, isAdmin, isApproved, setUser as persistUser, hasCompletedOnboarding } from "../lib/auth.js";
 import { ORKIO_VOICES, coerceVoiceId } from "../lib/voices.js";
 import TermsModal from "../ui/TermsModal.jsx";
@@ -324,6 +324,7 @@ React.useEffect(() => {
   const rtcThreadIdRef = useRef(null);
   const rtcEventQueueRef = useRef([]);
   const rtcFlushTimerRef = useRef(null);
+  const rtcAuthLostRef = useRef(false);
   // PATCH0100_27_2B: UI log + punct status
   const [rtcAuditEvents, setRtcAuditEvents] = useState([]);
   const [rtcPunctStatus, setRtcPunctStatus] = useState(null); // null | 'pending' | 'done' | 'timeout'
@@ -388,6 +389,81 @@ const closeCapacityModal = () => {
     window.MediaRecorder &&
     navigator.mediaDevices?.getUserMedia
   ));
+
+
+  function isRealtimeAuthError(err) {
+    const status = Number(err?.status || err?.response?.status || err?.cause?.status || 0);
+    if (status === 401) return true;
+    const msg = String(err?.message || err?.detail || "").toLowerCase();
+    return msg.includes("401") || msg.includes("unauthorized") || msg.includes("not authenticated") || msg.includes("jwt");
+  }
+
+  async function realtimeApi(path, { method = "POST", body, signal } = {}) {
+    try {
+      const res = await apiFetch(path, { method, token, org: tenant, body, signal });
+      if (rtcAuthLostRef.current) rtcAuthLostRef.current = false;
+      return res?.data ?? res;
+    } catch (err) {
+      if (isRealtimeAuthError(err)) {
+        rtcAuthLostRef.current = true;
+        try { clearRealtimeResponseTimeout(); } catch {}
+        try { if (rtcFlushTimerRef.current) { clearInterval(rtcFlushTimerRef.current); rtcFlushTimerRef.current = null; } } catch {}
+        try { setRtcReadyToRespond(false); } catch {}
+        try { setRealtimeMode(false); } catch {}
+        realtimeModeRef.current = false;
+        try { setV2vPhase("error"); } catch {}
+        try { setV2vError("REALTIME_AUTH_401"); } catch {}
+        try { setUploadStatus("Sessão expirada no realtime. Faça login novamente."); } catch {}
+      }
+      throw err;
+    }
+  }
+
+  async function getRealtimeClientSecret(payload) {
+    return await realtimeApi("/api/realtime/client_secret", { method: "POST", body: payload });
+  }
+
+  async function startRealtimeSession(payload) {
+    return await realtimeApi("/api/realtime/start", { method: "POST", body: payload });
+  }
+
+  async function startSummitSession(payload) {
+    const body = { ...(payload || {}), mode: "summit" };
+    return await realtimeApi("/api/realtime/start", { method: "POST", body });
+  }
+
+  async function postRealtimeEventsBatch(payload) {
+    return await realtimeApi("/api/realtime/events:batch", { method: "POST", body: payload });
+  }
+
+  async function endRealtimeSession(payload) {
+    if (rtcAuthLostRef.current) return { ok: false, skipped: "auth_lost" };
+    return await realtimeApi("/api/realtime/end", { method: "POST", body: payload });
+  }
+
+  async function getRealtimeSession(payload) {
+    if (!payload?.session_id) throw new Error("session_id obrigatório");
+    const sid = encodeURIComponent(payload.session_id);
+    const finalsOnly = payload?.finals_only === false ? "false" : "true";
+    return await realtimeApi(`/api/realtime/sessions/${sid}?finals_only=${finalsOnly}`, { method: "GET" });
+  }
+
+  async function getSummitSessionScore(payload) {
+    if (!payload?.session_id) throw new Error("session_id obrigatório");
+    const sid = encodeURIComponent(payload.session_id);
+    return await realtimeApi(`/api/realtime/sessions/${sid}/score`, { method: "GET" });
+  }
+
+  async function submitSummitSessionReview(payload) {
+    if (!payload?.session_id) throw new Error("session_id obrigatório");
+    const sid = encodeURIComponent(payload.session_id);
+    const { session_id, ...body } = payload || {};
+    return await realtimeApi(`/api/realtime/sessions/${sid}/review`, { method: "POST", body });
+  }
+
+  async function guardRealtimeTranscript(payload) {
+    return await realtimeApi("/api/realtime/guard", { method: "POST", body: payload });
+  }
 
   useEffect(() => {
     let alive = true;
@@ -1268,6 +1344,7 @@ async function confirmFounderHandoff() {
       setUploadStatus('⚡ Conectando Realtime (WebRTC)...');
 
       // Close any previous session
+      rtcAuthLostRef.current = false;
       await stopRealtime('restart');
 
       try { setRtcAuditEvents([]); } catch {}
@@ -1581,6 +1658,7 @@ async function confirmFounderHandoff() {
   }
 
   async function flushRealtimeEvents() {
+    if (rtcAuthLostRef.current) return;
     const sid = rtcSessionIdRef.current;
     if (!sid) return;
     const q = rtcEventQueueRef.current || [];
@@ -1599,6 +1677,7 @@ async function confirmFounderHandoff() {
 
   // PATCH0100_27_2B: finalize session on server + poll punctuated finals (best-effort)
   async function finalizeRealtimeSession(reason = 'client_stop') {
+    if (rtcAuthLostRef.current) return;
     const sid = rtcSessionIdRef.current;
     if (!sid) return;
     // stop timer
@@ -1702,7 +1781,7 @@ async function stopRealtime(reason = 'client_stop') {
       if (rtcFlushTimerRef.current) { try { clearInterval(rtcFlushTimerRef.current); } catch {} rtcFlushTimerRef.current = null; }
 
       try {
-        if (sid) {
+        if (sid && !rtcAuthLostRef.current) {
           await flushRealtimeEvents();
           await endRealtimeSession({ session_id: sid, ended_at: Date.now(), meta: { reason, mode: summitRuntimeModeRef.current } });
           try {
