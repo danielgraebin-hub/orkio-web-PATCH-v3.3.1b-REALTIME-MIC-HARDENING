@@ -20,14 +20,14 @@ const IS_SAMSUNG_DEVICE = /sm-|samsungbrowser|samsung/.test(MOBILE_UA);
 const IS_XIAOMI_DEVICE = /mi |mibrowser|redmi|poco|xiaomi/.test(MOBILE_UA);
 const IS_MOBILE_DEVICE = IS_IOS_DEVICE || IS_ANDROID_DEVICE;
 const REALTIME_MAGICWORDS_ENABLED = ((ORKIO_ENV.VITE_REALTIME_MAGICWORDS || import.meta.env.VITE_REALTIME_MAGICWORDS || "true").toString().trim().toLowerCase() !== "false");
-const REALTIME_TRANSCRIPT_MIN_CHARS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_MIN_CHARS || import.meta.env.VITE_REALTIME_MIN_CHARS || (IS_MOBILE_DEVICE ? "8" : "6"), 10);
-const REALTIME_TRANSCRIPT_ARM_DEBOUNCE_MS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_ARM_DEBOUNCE_MS || import.meta.env.VITE_REALTIME_ARM_DEBOUNCE_MS || (IS_IOS_DEVICE ? "650" : "500"), 10);
+const REALTIME_TRANSCRIPT_MIN_CHARS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_MIN_CHARS || import.meta.env.VITE_REALTIME_MIN_CHARS || (IS_MOBILE_DEVICE ? "4" : "3"), 10);
+const REALTIME_TRANSCRIPT_ARM_DEBOUNCE_MS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_ARM_DEBOUNCE_MS || import.meta.env.VITE_REALTIME_ARM_DEBOUNCE_MS || (IS_IOS_DEVICE ? "420" : "320"), 10);
 const REALTIME_MAGIC_DEBOUNCE_MS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_MAGIC_DEBOUNCE_MS || import.meta.env.VITE_REALTIME_MAGIC_DEBOUNCE_MS || "1800", 10);
 const REALTIME_READY_STATUS_MS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_READY_STATUS_MS || import.meta.env.VITE_REALTIME_READY_STATUS_MS || "1600", 10);
 const REALTIME_COOLDOWN_AFTER_REPLY_MS = Number.parseInt(
   ORKIO_ENV.VITE_REALTIME_COOLDOWN_AFTER_REPLY_MS ||
   import.meta.env.VITE_REALTIME_COOLDOWN_AFTER_REPLY_MS ||
-  (IS_IOS_DEVICE ? "3200" : (IS_ANDROID_DEVICE ? "2800" : "3000")),
+  (IS_IOS_DEVICE ? "2200" : (IS_ANDROID_DEVICE ? "1800" : "1900")),
   10
 );
 const REALTIME_RESTART_AFTER_TTS_MS = Number.parseInt(
@@ -57,7 +57,6 @@ function shouldIgnoreRealtimeTranscript(raw) {
   const tokens = clean.split(" ").filter(Boolean);
   if (tokens.length === 1 && compact.length <= 2) return true;
   if (/^(continue|please|prossiga|por favor)$/.test(clean)) return false;
-  if (containsMagicWord(clean)) return false;
   return false;
 }
 
@@ -88,18 +87,6 @@ function buildMobileAudioConstraints() {
 
 
 const SELECT_OPTION_STYLE = { backgroundColor: "#0f172a", color: "#ffffff" };
-
-const REALTIME_MAGIC_WORDS = ["continue", "please", "prossiga", "por favor"];
-const REALTIME_AUTO_TRIGGER_MAGIC_ONLY = ((ORKIO_ENV.VITE_REALTIME_AUTO_TRIGGER_MAGIC_ONLY || import.meta.env.VITE_REALTIME_AUTO_TRIGGER_MAGIC_ONLY || "false").toString().trim().toLowerCase() === "true");
-
-function containsMagicWord(raw) {
-  const clean = normalizeRealtimeTranscript(raw);
-  if (!clean) return false;
-  return REALTIME_MAGIC_WORDS.some((cmd) => {
-    const c = normalizeRealtimeTranscript(cmd);
-    return clean === c || clean.endsWith(` ${c}`) || clean.includes(` ${c} `);
-  });
-}
 
 
 
@@ -227,11 +214,9 @@ function formatDateTime(ts) {
 function resolveRealtimeTranscriptionLanguage(languageProfile) {
   const raw = (languageProfile || "").trim();
   if (!raw) return "";
-  const normalized = raw.replace(/=/g, "-");
-  if (normalized.toLowerCase() === "auto") return "";
-  if (/^pt(-|_)?br$/i.test(normalized)) return "pt-BR";
-  if (/^en(-|_)?us$/i.test(normalized)) return "en-US";
-  return normalized;
+  if (raw.toLowerCase() === "auto") return "";
+  if (raw === "pt-BR") return "pt";
+  return raw;
 }
 
 export default function AppConsole() {
@@ -1394,11 +1379,13 @@ async function confirmFounderHandoff() {
           const ev = JSON.parse(e.data);
 
                     // Turn arming + optional Magic Words (B3)
-          // We DO NOT auto-respond (create_response=false). We arm the turn on final transcript and
-          // only create a response when the user clicks, presses a hotkey, or speaks a magic word.
+          // Backend remains with create_response=false, so the frontend must explicitly send
+          // response.create after a valid final transcript. This now happens automatically in the
+          // normal path, not only via click, hotkey, or magic word.
           if (ev?.type === 'conversation.item.input_audio_transcription.completed') {
             const raw = (ev?.transcript || ev?.text || ev?.result?.transcript || '').toString();
             queueRealtimeEvent({ event_type: 'transcript.final', role: 'user', content: raw, is_final: true });
+            try {} catch {}
             if (shouldIgnoreRealtimeTranscript(raw)) {
               rtcLastFinalTranscriptRef.current = '';
               setRtcReadyToRespond(false);
@@ -1415,15 +1402,22 @@ async function confirmFounderHandoff() {
               Promise.resolve(guardAndMaybeBlockRealtimeTranscript(raw)).then((blocked) => {
                 if (blocked) return;
                 const norm = normalizeRealtimeTranscript(raw);
-                const hasMagic = containsMagicWord(norm);
+                const endsWithCmd = (s, cmd) => s === cmd || s.endsWith(' ' + cmd);
+                const isMagic = endsWithCmd(norm, 'continue') || endsWithCmd(norm, 'please') || endsWithCmd(norm, 'prossiga') || endsWithCmd(norm, 'por favor');
                 if (rtcArmTimerRef.current) {
                   try { clearTimeout(rtcArmTimerRef.current); } catch {}
                 }
                 rtcArmTimerRef.current = setTimeout(() => {
                   const now = Date.now();
-                  const canArm = !!raw.trim() && (!REALTIME_AUTO_TRIGGER_MAGIC_ONLY || hasMagic);
+                  const canArm = !!raw.trim();
                   setRtcReadyToRespond(canArm);
-                  if (rtcMagicEnabledRef.current && hasMagic) {
+
+                  if (!canArm) {
+                    setRtcReadyToRespond(false);
+                    return;
+                  }
+
+                  if (rtcMagicEnabledRef.current && isMagic) {
                     try {
                       if ((now - rtcLastTranscriptAtRef.current) < REALTIME_MAGIC_DEBOUNCE_MS && rtcLastMagicRef.current === norm) {
                         return;
@@ -1431,20 +1425,19 @@ async function confirmFounderHandoff() {
                       rtcLastTranscriptAtRef.current = now;
                       rtcLastMagicRef.current = norm;
                       triggerRealtimeResponse("magic");
+                      return;
                     } catch (err) {
                       console.warn('[Realtime] magic trigger failed', err);
                       if (raw.trim()) {
                         void sendMessage(raw);
                       }
+                      return;
                     }
-                  } else if (raw.trim()) {
-                    rtcLastTranscriptAtRef.current = now;
-                    setUploadStatus(REALTIME_AUTO_TRIGGER_MAGIC_ONLY
-                      ? 'Say “por favor” or “please” to trigger a realtime response.'
-                      : 'Ready to respond — click ▶️ or press Space/Enter.');
-                    setTimeout(() => setUploadStatus(''), REALTIME_READY_STATUS_MS);
                   }
-                }, Math.max(180, REALTIME_TRANSCRIPT_ARM_DEBOUNCE_MS));
+
+                  rtcLastTranscriptAtRef.current = now;
+                  triggerRealtimeResponse("auto");
+                }, Math.max(120, REALTIME_TRANSCRIPT_ARM_DEBOUNCE_MS));
               });
             }
           }
@@ -1532,42 +1525,28 @@ async function confirmFounderHandoff() {
       }
       rtcLastTriggerAtRef.current = now;
       const dc = rtcDcRef.current;
-      const lastTranscript = (rtcLastFinalTranscriptRef.current || "").trim();
-
       if (!dc || dc.readyState !== "open") {
-        setUploadStatus("Realtime fallback — answering via chat...");
-        setTimeout(() => setUploadStatus(""), 1400);
-        if (lastTranscript) {
-          void sendMessage(lastTranscript);
-        }
-        setRtcReadyToRespond(false);
-        return;
+        throw new Error("DataChannel não está aberto");
       }
-
       clearRealtimeResponseTimeout();
+      const lastTranscript = (rtcLastFinalTranscriptRef.current || "").trim();
       rtcResponseTimeoutRef.current = setTimeout(() => {
         if (!lastTranscript) return;
-        void sendMessage(lastTranscript);
-      }, 3200);
-
-      dc.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          output_modalities: ["audio", "text"],
-          audio: { output: { voice: rtcVoiceRef.current } }
-        }
-      }));
+        void activateSilentRealtimeFallback("response_timeout").then(() => {
+          if (lastTranscript) {
+            void sendMessage(lastTranscript);
+          }
+        });
+      }, 2800);
+      dc.send(JSON.stringify({ type: "response.create", response: { output_modalities: ["audio", "text"], audio: { output: { voice: rtcVoiceRef.current } } } }));
       setRtcReadyToRespond(false);
       setUploadStatus(reason === "magic" ? "✨ Command received — responding..." : "▶️ Responding...");
       setTimeout(() => setUploadStatus(""), 1500);
     } catch (e) {
       console.warn("[Realtime] triggerRealtimeResponse failed", e);
-      const lastTranscript = (rtcLastFinalTranscriptRef.current || "").trim();
-      if (lastTranscript) {
-        void sendMessage(lastTranscript);
-      }
-      setUploadStatus("Realtime fallback — answering via chat...");
-      setTimeout(() => setUploadStatus(""), 1800);
+      setUploadStatus("❌ Failed to trigger realtime response.");
+      setTimeout(() => setUploadStatus(""), 2000);
+      void activateSilentRealtimeFallback("trigger_failed");
     }
   }
 
