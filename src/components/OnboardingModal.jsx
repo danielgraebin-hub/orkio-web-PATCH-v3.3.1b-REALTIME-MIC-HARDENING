@@ -1,5 +1,4 @@
 import React, { useMemo, useState } from "react";
-import { apiFetch } from "../ui/api.js";
 import { getTenant, getToken } from "../lib/auth.js";
 
 const USER_TYPES = [
@@ -17,6 +16,81 @@ const INTENTS = [
   { value: "partnership", label: "Partnership" },
   { value: "curious", label: "Just curious" },
 ];
+
+const ORKIO_ENV =
+  typeof window !== "undefined" && window.__ORKIO_ENV__ ? window.__ORKIO_ENV__ : {};
+
+function normalizeBase(url) {
+  return String(url || "").trim().replace(/\/+$/, "");
+}
+
+function resolveApiBase() {
+  const envBase = normalizeBase(
+    ORKIO_ENV.VITE_API_BASE_URL || import.meta.env.VITE_API_BASE_URL || ""
+  );
+
+  // v3.3.1d — NETWORK HARDENING
+  // Prefer explicit API base when present to avoid web/proxy ambiguity.
+  if (envBase) return envBase;
+
+  // Fallback to same-origin only if env is absent.
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return normalizeBase(window.location.origin);
+  }
+  return "";
+}
+
+function buildUrl(path) {
+  const base = resolveApiBase();
+  const cleanPath = String(path || "").startsWith("/") ? path : `/${path}`;
+  return `${base}${cleanPath}`;
+}
+
+function buildHeaders(token, org) {
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (org) headers["X-Org-Slug"] = org;
+  return headers;
+}
+
+async function readErrorMessage(res) {
+  try {
+    const data = await res.json();
+    return data?.detail || data?.message || JSON.stringify(data);
+  } catch {
+    try {
+      return await res.text();
+    } catch {
+      return `${res.status} ${res.statusText}`;
+    }
+  }
+}
+
+async function saveOnboarding(payload, token, org) {
+  // Single contract only:
+  // POST /api/user/onboarding
+  const url = buildUrl("/api/user/onboarding");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: buildHeaders(token, org),
+    body: JSON.stringify(payload),
+    credentials: "include",
+  });
+
+  if (!res.ok) {
+    const msg = await readErrorMessage(res);
+    throw new Error(msg || `Onboarding failed (${res.status})`);
+  }
+
+  try {
+    return await res.json();
+  } catch {
+    return { status: "ok" };
+  }
+}
 
 const fieldStyle = {
   width: "100%",
@@ -38,41 +112,11 @@ const optionStyle = {
   color: "#ffffff",
 };
 
-async function saveOnboarding(payload, token, org) {
-  const attempts = [
-    { path: "/api/user/onboarding", method: "POST" },
-    { path: "/api/user/onboarding", method: "PUT" },
-    { path: "/api/onboarding", method: "POST" },
-    { path: "/api/onboarding", method: "PUT" },
-  ];
-
-  let lastErr = null;
-
-  for (const attempt of attempts) {
-    try {
-      const res = await apiFetch(attempt.path, {
-        method: attempt.method,
-        token,
-        org,
-        body: payload,
-      });
-      return res?.data || res;
-    } catch (err) {
-      lastErr = err;
-      const msg = String(err?.message || "");
-      const isMethodMismatch =
-        msg.includes("405") ||
-        msg.includes("Method Not Allowed") ||
-        msg.includes("Not Found") ||
-        msg.includes("404");
-      if (!isMethodMismatch) {
-        throw err;
-      }
-    }
-  }
-
-  throw lastErr || new Error("Could not save onboarding.");
-}
+const labelStyle = {
+  display: "block",
+  marginBottom: 8,
+  color: "rgba(255,255,255,0.72)",
+};
 
 export default function OnboardingModal({ user, onComplete }) {
   const [form, setForm] = useState({
@@ -93,6 +137,7 @@ export default function OnboardingModal({ user, onComplete }) {
 
   async function handleSubmit(e) {
     e?.preventDefault?.();
+
     if (!form.user_type || !form.intent) {
       setError("Please choose your user type and main interest.");
       return;
@@ -157,7 +202,8 @@ export default function OnboardingModal({ user, onComplete }) {
           overflowY: "auto",
           borderRadius: 24,
           border: "1px solid rgba(255,255,255,0.10)",
-          background: "linear-gradient(180deg, rgba(18,24,41,0.98), rgba(9,14,26,0.98))",
+          background:
+            "linear-gradient(180deg, rgba(18,24,41,0.98), rgba(9,14,26,0.98))",
           boxShadow: "0 24px 80px rgba(0,0,0,0.35)",
           color: "#fff",
           padding: 20,
@@ -185,17 +231,13 @@ export default function OnboardingModal({ user, onComplete }) {
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 14 }}>
           <div>
-            <label style={{ display: "block", marginBottom: 8, color: "rgba(255,255,255,0.7)" }}>
-              Full name
-            </label>
+            <label style={labelStyle}>Full name</label>
             <input value={fullName} readOnly style={{ ...fieldStyle, opacity: 0.85 }} />
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
             <div>
-              <label style={{ display: "block", marginBottom: 8, color: "rgba(255,255,255,0.7)" }}>
-                Company
-              </label>
+              <label style={labelStyle}>Company</label>
               <input
                 value={form.company}
                 onChange={(e) => setField("company", e.target.value)}
@@ -203,54 +245,46 @@ export default function OnboardingModal({ user, onComplete }) {
                 style={fieldStyle}
               />
             </div>
+
             <div>
-              <label style={{ display: "block", marginBottom: 8, color: "rgba(255,255,255,0.7)" }}>
-                Role / Title
-              </label>
+              <label style={labelStyle}>Role / Title</label>
               <input
                 value={form.role}
                 onChange={(e) => setField("role", e.target.value)}
-                placeholder="CEO, Partner, Product Lead..."
+                placeholder="Founder, Partner, CTO..."
                 style={fieldStyle}
               />
             </div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
             <div>
-              <label style={{ display: "block", marginBottom: 8, color: "rgba(255,255,255,0.7)" }}>
-                User type
-              </label>
+              <label style={labelStyle}>User type</label>
               <select
                 value={form.user_type}
                 onChange={(e) => setField("user_type", e.target.value)}
                 style={fieldStyle}
               >
-                <option style={optionStyle} value="">
-                  Choose one
-                </option>
-                {USER_TYPES.map((item) => (
-                  <option key={item.value} value={item.value} style={optionStyle}>
-                    {item.label}
+                <option value="" style={optionStyle}>Select...</option>
+                {USER_TYPES.map((opt) => (
+                  <option key={opt.value} value={opt.value} style={optionStyle}>
+                    {opt.label}
                   </option>
                 ))}
               </select>
             </div>
+
             <div>
-              <label style={{ display: "block", marginBottom: 8, color: "rgba(255,255,255,0.7)" }}>
-                Main interest
-              </label>
+              <label style={labelStyle}>Main interest</label>
               <select
                 value={form.intent}
                 onChange={(e) => setField("intent", e.target.value)}
                 style={fieldStyle}
               >
-                <option style={optionStyle} value="">
-                  Choose one
-                </option>
-                {INTENTS.map((item) => (
-                  <option key={item.value} value={item.value} style={optionStyle}>
-                    {item.label}
+                <option value="" style={optionStyle}>Select...</option>
+                {INTENTS.map((opt) => (
+                  <option key={opt.value} value={opt.value} style={optionStyle}>
+                    {opt.label}
                   </option>
                 ))}
               </select>
@@ -258,51 +292,63 @@ export default function OnboardingModal({ user, onComplete }) {
           </div>
 
           <div>
-            <label style={{ display: "block", marginBottom: 8, color: "rgba(255,255,255,0.7)" }}>
-              Anything you'd like Orkio to focus on?
-            </label>
+            <label style={labelStyle}>Anything you'd like Orkio to focus on?</label>
             <textarea
               value={form.notes}
               onChange={(e) => setField("notes", e.target.value)}
               placeholder="Optional note"
-              rows={4}
-              style={{ ...fieldStyle, resize: "vertical", minHeight: 112 }}
+              rows={5}
+              style={{ ...fieldStyle, resize: "vertical" }}
             />
           </div>
-        </div>
 
-        {error ? <div style={{ marginTop: 14, color: "#ffb4b4" }}>{error}</div> : null}
+          {error ? (
+            <div
+              style={{
+                borderRadius: 14,
+                border: "1px solid rgba(255,120,120,0.25)",
+                background: "rgba(120,20,20,0.18)",
+                color: "#ffd6d6",
+                padding: "12px 14px",
+                fontSize: 14,
+              }}
+            >
+              {error}
+            </div>
+          ) : null}
 
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            gap: 12,
-            alignItems: "center",
-            marginTop: 18,
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ color: "rgba(255,255,255,0.6)", fontSize: 14 }}>
-            This appears only once after your approved login.
-          </div>
-          <button
-            type="submit"
-            disabled={busy}
+          <div
             style={{
-              border: 0,
-              borderRadius: 16,
-              padding: "14px 20px",
-              minWidth: 220,
-              fontSize: 16,
-              fontWeight: 600,
-              cursor: busy ? "wait" : "pointer",
-              background: "#ffffff",
-              color: "#0b1020",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              marginTop: 8,
             }}
           >
-            {busy ? "Saving..." : "Continue to Orkio"}
-          </button>
+            <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 13 }}>
+              This appears only once after your approved login.
+            </div>
+
+            <button
+              type="submit"
+              disabled={busy}
+              style={{
+                border: "none",
+                borderRadius: 18,
+                background: "#ffffff",
+                color: "#111827",
+                padding: "14px 22px",
+                fontSize: 18,
+                fontWeight: 700,
+                cursor: busy ? "wait" : "pointer",
+                opacity: busy ? 0.7 : 1,
+                minWidth: 220,
+              }}
+            >
+              {busy ? "Saving..." : "Continue to Orkio"}
+            </button>
+          </div>
         </div>
       </form>
     </div>
