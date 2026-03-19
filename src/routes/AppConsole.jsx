@@ -219,6 +219,18 @@ function resolveRealtimeTranscriptionLanguage(languageProfile) {
   return raw;
 }
 
+function resolveSttLanguage(languageProfile) {
+  const raw = (languageProfile || "").trim();
+  if (!raw) return "";
+  const norm = raw.replace(/_/g, "-").toLowerCase();
+  if (norm === "auto") return "";
+  if (norm === "pt-br" || norm === "pt-pt" || norm === "pt") return "pt";
+  if (norm === "en-us" || norm === "en-gb" || norm === "en") return "en";
+  if (norm === "es-es" || norm === "es-mx" || norm === "es") return "es";
+  if (norm === "fr-fr" || norm === "fr") return "fr";
+  return norm.includes("-") ? norm.split("-")[0] : norm;
+}
+
 export default function AppConsole() {
 
   const SHOW_REALTIME_AUDIT = false;
@@ -1036,7 +1048,7 @@ useEffect(() => {
             console.info('[V2V] v2v_record_received trace_id=%s size=%d', trace, blob.size);
 
             try {
-              const sttLang = (window.__ORKIO_ENV__?.VITE_STT_LANGUAGE || window.__ORKIO_ENV__?.VITE_REALTIME_TRANSCRIBE_LANGUAGE || import.meta.env.VITE_STT_LANGUAGE || import.meta.env.VITE_REALTIME_TRANSCRIBE_LANGUAGE || "").trim();
+              const sttLang = resolveSttLanguage((window.__ORKIO_ENV__?.VITE_STT_LANGUAGE || window.__ORKIO_ENV__?.VITE_REALTIME_TRANSCRIBE_LANGUAGE || import.meta.env.VITE_STT_LANGUAGE || import.meta.env.VITE_REALTIME_TRANSCRIBE_LANGUAGE || "").trim());
               const result = await transcribeAudio(blob, { token, org: tenant, trace_id: trace, language: sttLang || null });
               const text = (result?.text || '').trim();
               console.info('[V2V] v2v_stt_ok trace_id=%s chars=%d preview=%s', trace, text.length, text.slice(0, 60));
