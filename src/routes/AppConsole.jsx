@@ -419,8 +419,12 @@ const closeCapacityModal = () => {
       } catch (e) {
         console.warn("PROFILE_BOOTSTRAP_FAILED", e);
         setHealth("down");
+        clearSession();
+        if (alive) setProfileReady(false);
+        nav("/auth");
+        return;
       } finally {
-        if (alive) setProfileReady(true);
+        if (alive && getToken()) setProfileReady(true);
       }
     }
     bootstrapProfile();
@@ -589,12 +593,12 @@ useEffect(() => {
   }
 
   useEffect(() => {
-    if (!token) return;
+    if (!token || showOnboarding) return;
     loadThreads();
     loadAgents();
-  }, [token, tenant]);
+  }, [token, tenant, showOnboarding]);
 
-  useEffect(() => { if (threadId) loadMessages(threadId); }, [threadId]);
+  useEffect(() => { if (threadId && !showOnboarding) loadMessages(threadId); }, [threadId, showOnboarding]);
 
   async function createThread() {
     try {
@@ -1346,7 +1350,7 @@ async function confirmFounderHandoff() {
         // Summit language hint is locked to English unless explicitly overridden by env.
         try {
           const envLang = (window.__ORKIO_ENV__?.VITE_REALTIME_TRANSCRIBE_LANGUAGE || import.meta.env.VITE_REALTIME_TRANSCRIBE_LANGUAGE || "").trim();
-          const preferredLang = summitRuntimeModeRef.current === "summit" ? (summitLanguageProfileRef.current || envLang || "") : envLang;
+          const preferredLang = envLang || (summitRuntimeModeRef.current === "summit" ? (summitLanguageProfileRef.current || "") : "");
           const langHint = resolveRealtimeTranscriptionLanguage(preferredLang);
           const transcription = { model: "gpt-4o-mini-transcribe" };
           if (langHint) transcription.language = langHint;
