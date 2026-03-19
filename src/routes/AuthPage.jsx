@@ -53,7 +53,7 @@ export default function AuthPage() {
       if (data?.pending_otp) {
         setOtpMode(true);
         setPendingEmail(data.email || email);
-        setStatus(data.message || "Enter the verification code sent to your e-mail.");
+        setStatus(data.message || "Enter the verification code sent to your e-mail. If your account is still pending, access will remain awaiting manual approval after verification.");
         return;
       }
       if (data?.pending_approval) {
@@ -128,14 +128,18 @@ export default function AuthPage() {
         },
       });
       if (data?.pending_approval) {
+        setPendingApproval(true);
         setTab("login");
-        setStatus(data.message || "Account created. Sign in to verify your identity by OTP. Access to the app remains pending manual approval.");
+        setStatus(data.message || "Account created. Your identity is pending OTP verification and app access will remain awaiting manual approval.");
         return;
       }
       if (data?.pending_otp) {
         setOtpMode(true);
         setPendingEmail(data.email || email);
-        setStatus("Account created. Enter the verification code sent to your e-mail.");
+        setStatus(
+          data.message ||
+          "Account created. Enter the verification code sent to your e-mail. Access to the app will remain pending manual approval until approved."
+        );
         return;
       }
       if (data?.access_token) {
