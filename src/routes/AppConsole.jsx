@@ -924,9 +924,15 @@ useEffect(() => {
         if (destMode !== "team" && toSpeak.length > 1) toSpeak = toSpeak.slice(-1);
 
         const currentTrace = v2vTraceRef.current || traceId;
+        const shouldAutoSpeakThisTurn =
+          !!opts?.explicitVoiceRequested ||
+          !!opts?.voiceRequested ||
+          !!opts?.realtimeTurn;
+
         for (const m of toSpeak) {
           const content = (m.content || "").trim();
           if (!content) continue;
+          if (!shouldAutoSpeakThisTurn) continue;
           const agentIdFallback = m.agent_id || null;
           // preferir message_id (backend resolve voz); agent_id só como fallback
           setV2vPhase('tts');
@@ -1518,7 +1524,7 @@ async function confirmFounderHandoff() {
                     } catch (err) {
                       console.warn('[Realtime] magic trigger failed', err);
                       if (raw.trim()) {
-                        void sendMessage(raw);
+                        void sendMessage(raw, { explicitVoiceRequested: true, realtimeTurn: true });
                       }
                       return;
                     }
@@ -1567,6 +1573,30 @@ async function confirmFounderHandoff() {
             setV2vError(ev?.error?.message || 'Erro Realtime');
             setV2vPhase('error');
             void activateSilentRealtimeFallback('realtime_error');
+          }
+
+          if (ev?.type === 'response.created') {
+            clearRealtimeResponseTimeout();
+          }
+
+          if (ev?.type === 'response.output_item.added') {
+            clearRealtimeResponseTimeout();
+          }
+
+          if (ev?.type === 'response.content_part.added') {
+            clearRealtimeResponseTimeout();
+          }
+
+          if (ev?.type === 'response.text.delta' && ev?.delta) {
+            clearRealtimeResponseTimeout();
+          }
+
+          if (ev?.type === 'response.audio.delta') {
+            clearRealtimeResponseTimeout();
+          }
+
+          if (ev?.type === 'response.audio_transcript.delta' && ev?.delta) {
+            clearRealtimeResponseTimeout();
           }
         } catch {}
       });
@@ -1620,13 +1650,11 @@ async function confirmFounderHandoff() {
       clearRealtimeResponseTimeout();
       const lastTranscript = (rtcLastFinalTranscriptRef.current || "").trim();
       rtcResponseTimeoutRef.current = setTimeout(() => {
-        if (!lastTranscript) return;
-        void activateSilentRealtimeFallback("response_timeout").then(() => {
-          if (lastTranscript) {
-            void sendMessage(lastTranscript);
-          }
-        });
-      }, 2800);
+        // Não destruir o realtime por timeout curto.
+        // Apenas sinalizar atraso de resposta.
+        setUploadStatus("⌛ Realtime ainda processando...");
+        setTimeout(() => setUploadStatus(""), 1200);
+      }, 7000);
       dc.send(JSON.stringify({ type: "response.create", response: { output_modalities: ["audio", "text"], audio: { output: { voice: rtcVoiceRef.current } } } }));
       setRtcReadyToRespond(false);
       setUploadStatus(reason === "magic" ? "✨ Command received — responding..." : "▶️ Responding...");
