@@ -86,6 +86,9 @@ function buildMobileAudioConstraints() {
 }
 
 
+const SELECT_OPTION_STYLE = { backgroundColor: "#0f172a", color: "#ffffff" };
+
+
 
 // Icons (inline SVG)
 const IconPlus = () => (
@@ -412,7 +415,10 @@ const closeCapacityModal = () => {
           nav("/auth");
           return;
         }
-        setShowOnboarding(!hasCompletedOnboarding(data));
+        const normalizedEmail = (data?.email || "").trim().toLowerCase();
+        const isExpectedSuperAdmin = normalizedEmail === "daniel@patroai.com";
+        const isPrivilegedUser = isExpectedSuperAdmin || data?.role === "admin" || data?.role === "super_admin";
+        setShowOnboarding(isPrivilegedUser ? false : !hasCompletedOnboarding(data));
         if (!data.terms_accepted_at) {
           setShowTermsModal(true);
         }
@@ -2351,20 +2357,20 @@ async function stopRealtime(reason = 'client_stop') {
 
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <select style={styles.select} value={destMode} onChange={(e) => setDestMode(e.target.value)}>
-              <option value="team">Team</option>
-              <option value="single">1 agente</option>
-              <option value="multi">multi</option>
+              <option value="team" style={SELECT_OPTION_STYLE}>Team</option>
+              <option value="single" style={SELECT_OPTION_STYLE}>1 agente</option>
+              <option value="multi" style={SELECT_OPTION_STYLE}>multi</option>
             </select>
 
             {destMode === "single" ? (
               <select style={styles.select} value={destSingle} onChange={(e) => setDestSingle(e.target.value)}>
-                {agents.map(a => <option key={a.id} value={a.id}>{a.name}{a.is_default ? " (default)" : ""}</option>)}
+                {agents.map(a => <option key={a.id} value={a.id} style={SELECT_OPTION_STYLE}>{a.name}{a.is_default ? " (default)" : ""}</option>)}
               </select>
             ) : null}
 
             {destMode === "multi" && !isMobile ? (
               <select style={styles.select} value="choose" onChange={() => {}}>
-                <option value="choose">Selecionar no envio...</option>
+                <option value="choose" style={SELECT_OPTION_STYLE}>Selecionar no envio...</option>
               </select>
             ) : null}
           </div>
