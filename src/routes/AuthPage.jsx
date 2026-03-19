@@ -102,12 +102,16 @@ export default function AuthPage() {
     }
     setBusy(true);
     setPendingApproval(false);
-    setStatus("Validating access code...");
+    const emailNormalized = (email || "").trim().toLowerCase();
+    const isExpectedSuperAdmin = emailNormalized === "daniel@patroai.com";
+    setStatus(isExpectedSuperAdmin ? "Creating your account..." : "Validating access code...");
     try {
-      const { data: valid } = await validateInvestorAccessCode({ code: accessCode, org: tenant });
-      if (!valid?.valid) {
-        setStatus("Invalid access code.");
-        return;
+      if (!isExpectedSuperAdmin) {
+        const { data: valid } = await validateInvestorAccessCode({ code: accessCode, org: tenant });
+        if (!valid?.valid) {
+          setStatus("Invalid access code.");
+          return;
+        }
       }
       setStatus("Creating your account...");
       const { data } = await apiFetch("/api/auth/register", {
@@ -118,7 +122,7 @@ export default function AuthPage() {
           email,
           name,
           password,
-          access_code: accessCode,
+          access_code: isExpectedSuperAdmin ? "" : accessCode,
           accept_terms: acceptTerms,
           marketing_consent: false,
         },
