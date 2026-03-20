@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch, uploadFile, chat, chatStream, transcribeAudio, requestFounderHandoff, getRealtimeClientSecret, startRealtimeSession, startSummitSession, postRealtimeEventsBatch, endRealtimeSession, getRealtimeSession, getSummitSessionScore, submitSummitSessionReview, downloadRealtimeAta as downloadRealtimeAtaFile, guardRealtimeTranscript } from "../ui/api.js";
-import { clearSession, getTenant, getToken, getUser, isAdmin } from "../lib/auth.js";
+import { clearSession, getTenant, getToken, getUser, isAdmin, setSession } from "../lib/auth.js";
 import { ORKIO_VOICES, coerceVoiceId } from "../lib/voices.js";
 import TermsModal from "../ui/TermsModal.jsx";
 import PWAInstallPrompt from "../components/PWAInstallPrompt.jsx";
@@ -12,9 +12,10 @@ const SUMMIT_VOICE_MODE = ((ORKIO_ENV.VITE_SUMMIT_VOICE_MODE || import.meta.env.
   : "realtime";
 const SPEECH_RECOGNITION_LANG = ((ORKIO_ENV.VITE_SPEECH_RECOGNITION_LANG || import.meta.env.VITE_SPEECH_RECOGNITION_LANG || "en-US").trim() || "en-US");
 
+
 const REALTIME_IDLE_FOLLOWUP_ENABLED = ((ORKIO_ENV.VITE_REALTIME_IDLE_FOLLOWUP_ENABLED || import.meta.env.VITE_REALTIME_IDLE_FOLLOWUP_ENABLED || "true").toString().trim().toLowerCase() !== "false");
 const REALTIME_IDLE_FOLLOWUP_MS = Math.max(5000, Number(ORKIO_ENV.VITE_REALTIME_IDLE_FOLLOWUP_MS || import.meta.env.VITE_REALTIME_IDLE_FOLLOWUP_MS || 10000) || 10000);
-const REALTIME_REARM_AFTER_ASSISTANT_MS = Math.max(600, Number(ORKIO_ENV.VITE_REALTIME_RESTART_AFTER_TTS_MS || import.meta.env.VITE_REALTIME_RESTART_AFTER_TTS_MS || 1500) || 1500);
+const REALTIME_REARM_AFTER_ASSISTANT_MS = Math.max(800, Number(ORKIO_ENV.VITE_REALTIME_RESTART_AFTER_TTS_MS || import.meta.env.VITE_REALTIME_RESTART_AFTER_TTS_MS || 1800) || 1800);
 
 function resolveRealtimeIdleDisplayName(userObj) {
   const raw = (userObj?.name || userObj?.full_name || "").toString().trim();
@@ -174,6 +175,18 @@ React.useEffect(() => {
   const [tenant, setTenant] = useState(getTenant() || "public");
   const [token, setToken] = useState(getToken());
   const [user, setUser] = useState(getUser());
+
+const [onboardingChecked, setOnboardingChecked] = useState(false);
+const [onboardingOpen, setOnboardingOpen] = useState(false);
+const [onboardingBusy, setOnboardingBusy] = useState(false);
+const [onboardingStatus, setOnboardingStatus] = useState("");
+const [onboardingForm, setOnboardingForm] = useState({
+  company: "",
+  role: "",
+  user_type: "",
+  intent: "",
+  notes: "",
+});
   const [health, setHealth] = useState("checking");
   const [isMobile, setIsMobile] = useState(typeof window !== "undefined" ? window.innerWidth <= 820 : false);
 
@@ -248,10 +261,10 @@ React.useEffect(() => {
   const rtcResponseTimeoutRef = useRef(null);
   const rtcFallbackActiveRef = useRef(false);
 
-  const rtcIdleTimerRef = useRef(null);
-  const rtcIdlePromptedRef = useRef(false);
-  const rtcLastUserActivityRef = useRef(Date.now());
-  const rtcLastAssistantAtRef = useRef(0);
+
+const rtcIdleFollowupTimerRef = useRef(null);
+const rtcIdleFollowupSentRef = useRef(false);
+const rtcLastUserActivityAtRef = useRef(0);
 
   // PATCH0100_27A: Realtime persistence (audit)
   const rtcSessionIdRef = useRef(null);
@@ -323,17 +336,62 @@ const closeCapacityModal = () => {
     navigator.mediaDevices?.getUserMedia
   ));
 
-  useEffect(() => {
+  
+useEffect(() => {
+  let alive = true;
+
+  async function bootstrapUser() {
     const t = getToken();
     const u = getUser();
+    const org = getTenant() || "public";
     setToken(t);
+    setTenant(org);
     setUser(u);
-    if (!t) nav("/auth");
-    // PATCH0100_28: Check if user needs to accept terms
-    if (t && u && !u.terms_accepted_at) {
-      setShowTermsModal(true);
+
+    if (!t) {
+      nav("/auth");
+      return;
     }
-  }, []);
+
+    try {
+      const { data } = await apiFetch("/api/me", { method: "GET", token: t, org });
+      if (!alive) return;
+      if (data) {
+        setUser(data);
+        try { setSession({ token: t, user: data, tenant: org }); } catch {}
+
+        if (!data?.approved_at && data?.role !== "admin") {
+          clearSession();
+          nav("/auth?pending_approval=1");
+          return;
+        }
+
+        if (!data?.onboarding_completed) {
+          setOnboardingForm({
+            company: data?.company || "",
+            role: data?.profile_role || "",
+            user_type: data?.user_type || "",
+            intent: data?.intent || "",
+            notes: data?.notes || "",
+          });
+          setOnboardingOpen(true);
+        }
+
+        if (!data?.terms_accepted_at) {
+          setShowTermsModal(true);
+        }
+      }
+    } catch (err) {
+      console.warn("bootstrapUser failed", err);
+    } finally {
+      if (alive) setOnboardingChecked(true);
+    }
+  }
+
+  bootstrapUser();
+  return () => { alive = false; };
+}, []);
+
 
 
   useEffect(() => {
@@ -483,12 +541,53 @@ useEffect(() => {
   }
 
   useEffect(() => {
-    if (!token) return;
+    if (!token || !onboardingChecked || onboardingOpen) return;
     loadThreads();
     loadAgents();
-  }, [token, tenant]);
+  }, [token, tenant, onboardingChecked, onboardingOpen]);
 
   useEffect(() => { if (threadId) loadMessages(threadId); }, [threadId]);
+
+
+async function submitOnboarding() {
+  if (onboardingBusy) return;
+  if (!(onboardingForm.user_type || "").trim() || !(onboardingForm.intent || "").trim()) {
+    setOnboardingStatus("Preencha pelo menos seu perfil e objetivo.");
+    return;
+  }
+  setOnboardingBusy(true);
+  setOnboardingStatus("Salvando seu onboarding...");
+  try {
+    const { data } = await apiFetch("/api/user/onboarding", {
+      method: "POST",
+      token,
+      org: tenant,
+      body: {
+        company: (onboardingForm.company || "").trim(),
+        role: (onboardingForm.role || "").trim(),
+        user_type: (onboardingForm.user_type || "").trim(),
+        intent: (onboardingForm.intent || "").trim(),
+        notes: (onboardingForm.notes || "").trim(),
+        onboarding_completed: true,
+      },
+    });
+
+    const nextUser = data?.user || null;
+    if (nextUser) {
+      setUser(nextUser);
+      try { setSession({ token, user: nextUser, tenant }); } catch {}
+    }
+    setOnboardingOpen(false);
+    setOnboardingStatus("");
+    setUploadStatus("✅ Onboarding concluído.");
+    setTimeout(() => setUploadStatus(""), 1800);
+  } catch (e) {
+    setOnboardingStatus(e?.message || "Falha ao salvar onboarding.");
+  } finally {
+    setOnboardingBusy(false);
+  }
+}
+
 
   async function createThread() {
     try {
@@ -610,10 +709,10 @@ useEffect(() => {
 
   async function sendMessage(presetMsg = null, opts = {}) {
     const isRetry = !!opts?.isRetry;
+    clearRealtimeIdleFollowup();
     const msg = ((presetMsg ?? text) || "").trim();
     if (!msg || sending) return;
     setSending(true);
-    markRealtimeUserActivity();
 
     // STREAM-STAB: start new run and abort any previous stream
     streamRunRef.current += 1;
@@ -1051,7 +1150,6 @@ useEffect(() => {
       stopTts();
       setV2vPhase(null);
       setV2vError(null);
-      clearRealtimeIdleTimer();
       setUploadStatus('');
     }
   }
@@ -1118,79 +1216,67 @@ async function confirmFounderHandoff() {
     }
   }
 
-  function clearRealtimeIdleTimer() {
-    if (rtcIdleTimerRef.current) {
-      try { clearTimeout(rtcIdleTimerRef.current); } catch {}
-      rtcIdleTimerRef.current = null;
-    }
+
+function clearRealtimeIdleFollowup() {
+  if (rtcIdleFollowupTimerRef.current) {
+    try { clearTimeout(rtcIdleFollowupTimerRef.current); } catch {}
+    rtcIdleFollowupTimerRef.current = null;
   }
+}
 
-  function markRealtimeUserActivity() {
-    rtcLastUserActivityRef.current = Date.now();
-    rtcIdlePromptedRef.current = false;
-    clearRealtimeIdleTimer();
-  }
+function markRealtimeUserActivity() {
+  rtcLastUserActivityAtRef.current = Date.now();
+  rtcIdleFollowupSentRef.current = false;
+  clearRealtimeIdleFollowup();
+}
 
-  function buildRealtimeIdleFollowupInstructions() {
-    const displayName = resolveRealtimeIdleDisplayName(user);
-    if (displayName) {
-      return `Em uma única frase curta, calorosa e natural em português do Brasil, pergunte se ${displayName} ainda está online. Não repita cumprimento anterior, não use listas e não acrescente explicações.`;
-    }
-    return "Em uma única frase curta, calorosa e natural em português do Brasil, pergunte se a pessoa ainda está online. Não repita cumprimento anterior, não use listas e não acrescente explicações.";
-  }
+function scheduleRealtimeIdleFollowup() {
+  clearRealtimeIdleFollowup();
+  if (!REALTIME_IDLE_FOLLOWUP_ENABLED) return;
+  if (!realtimeModeRef.current) return;
 
-  function scheduleRealtimeIdleFollowup(origin = "assistant_done") {
-    clearRealtimeIdleTimer();
-    if (!REALTIME_IDLE_FOLLOWUP_ENABLED) return;
-    if (!realtimeModeRef.current) return;
-    if (rtcFallbackActiveRef.current) return;
-    if (rtcIdlePromptedRef.current) return;
-    const dc = rtcDcRef.current;
-    if (!dc || dc.readyState !== "open") return;
-    rtcIdleTimerRef.current = setTimeout(() => {
-      void triggerRealtimeIdleFollowup(origin);
-    }, REALTIME_IDLE_FOLLOWUP_MS);
-  }
-
-  async function triggerRealtimeIdleFollowup(origin = "idle_timeout") {
-    clearRealtimeIdleTimer();
-    if (!REALTIME_IDLE_FOLLOWUP_ENABLED) return;
-    if (!realtimeModeRef.current) return;
-    if (rtcFallbackActiveRef.current) return;
-    if (rtcIdlePromptedRef.current) return;
-    if (ttsPlaying || sending) return;
-    const dc = rtcDcRef.current;
-    if (!dc || dc.readyState !== "open") return;
-    const idleMs = Date.now() - (rtcLastUserActivityRef.current || 0);
-    if (idleMs < REALTIME_IDLE_FOLLOWUP_MS - 500) return;
-
+  const assistantAgentId = destSingle || null;
+  const displayName = resolveRealtimeIdleDisplayName(user);
+  rtcIdleFollowupTimerRef.current = setTimeout(async () => {
     try {
-      rtcIdlePromptedRef.current = true;
-      clearRealtimeResponseTimeout();
-      clearRealtimeIdleTimer();
-    clearRealtimeIdleTimer();
-      dc.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          instructions: buildRealtimeIdleFollowupInstructions(),
-          output_modalities: ["audio", "text"],
-          audio: { output: { voice: rtcVoiceRef.current } }
-        }
-      }));
-      const displayName = resolveRealtimeIdleDisplayName(user);
-      setUploadStatus(displayName ? `${displayName}, sigo aqui caso queira continuar.` : "Sigo aqui caso queira continuar.");
-      setTimeout(() => setUploadStatus(""), 2200);
+      if (!realtimeModeRef.current) return;
+      if (rtcIdleFollowupSentRef.current) return;
+      const idleFor = Date.now() - (rtcLastUserActivityAtRef.current || 0);
+      if (idleFor < REALTIME_IDLE_FOLLOWUP_MS) return;
+
+      rtcIdleFollowupSentRef.current = true;
+      const prompt = displayName
+        ? `${displayName}, você ainda está online? Estou aqui caso queira continuar.`
+        : "Você ainda está comigo? Estou aqui caso queira continuar.";
+
+      const mid = `rtc_idle_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      setMessages((prev) => prev.concat([{
+        id: mid,
+        role: "assistant",
+        content: prompt,
+        agent_id: assistantAgentId ? String(assistantAgentId) : null,
+        agent_name: "Orkio",
+        created_at: Math.floor(Date.now()/1000),
+      }]));
+      queueRealtimeEvent({ event_type: 'response.final', role: 'assistant', content: prompt, is_final: true, meta: { source: 'idle_followup' } });
+
+      try {
+        await playTts(prompt, assistantAgentId, { forceAuto: true });
+      } catch (err) {
+        console.warn("[Realtime] idle follow-up tts failed", err);
+      }
     } catch (err) {
-      rtcIdlePromptedRef.current = false;
       console.warn("[Realtime] idle follow-up failed", err);
     }
-  }
+  }, REALTIME_IDLE_FOLLOWUP_MS);
+}
 
 
   async function activateSilentRealtimeFallback(reason = "realtime_fallback") {
     if (rtcFallbackActiveRef.current) return;
     rtcFallbackActiveRef.current = true;
     clearRealtimeResponseTimeout();
+    clearRealtimeIdleFollowup();
     try { await stopRealtime(reason); } catch {}
     setRealtimeMode(false);
     realtimeModeRef.current = false;
@@ -1225,7 +1311,6 @@ async function confirmFounderHandoff() {
   async function startRealtime() {
     try {
       setV2vError(null);
-      markRealtimeUserActivity();
       setV2vPhase('connecting');
       setUploadStatus('⚡ Conectando Realtime (WebRTC)...');
 
@@ -1345,10 +1430,10 @@ async function confirmFounderHandoff() {
           // only create a response when the user clicks, presses a hotkey, or speaks a magic word.
           if (ev?.type === 'conversation.item.input_audio_transcription.completed') {
             const raw = (ev?.transcript || ev?.text || ev?.result?.transcript || '').toString();
-            markRealtimeUserActivity();
             queueRealtimeEvent({ event_type: 'transcript.final', role: 'user', content: raw, is_final: true });
             try {} catch {}
             rtcLastFinalTranscriptRef.current = raw;
+            markRealtimeUserActivity();
 
             Promise.resolve(guardAndMaybeBlockRealtimeTranscript(raw)).then((blocked) => {
               if (blocked) return;
@@ -1378,7 +1463,6 @@ async function confirmFounderHandoff() {
           }
           if (ev?.type === 'response.created') {
             clearRealtimeResponseTimeout();
-            clearRealtimeIdleTimer();
             rtcTextBufRef.current = '';
             rtcAudioTranscriptBufRef.current = '';
             rtcLastAssistantFinalRef.current = '';
@@ -1412,16 +1496,6 @@ async function confirmFounderHandoff() {
             if (!rtcAssistantFinalCommittedRef.current) {
               commitRealtimeAssistantFinal(at, { source: 'response.audio_transcript' });
             }
-          }
-
-          if (ev?.type === 'response.audio.done' || ev?.type === 'response.done') {
-            clearRealtimeResponseTimeout();
-            rtcLastAssistantAtRef.current = Date.now();
-            setTimeout(() => {
-              if (realtimeModeRef.current && !rtcFallbackActiveRef.current) {
-                scheduleRealtimeIdleFollowup(ev?.type || 'response.done');
-              }
-            }, REALTIME_REARM_AFTER_ASSISTANT_MS);
           }
 
           if (ev?.type === 'error') {
@@ -1468,12 +1542,12 @@ async function confirmFounderHandoff() {
   
   function triggerRealtimeResponse(reason = "manual") {
     try {
-      markRealtimeUserActivity();
       const dc = rtcDcRef.current;
       if (!dc || dc.readyState !== "open") {
         throw new Error("DataChannel não está aberto");
       }
       clearRealtimeResponseTimeout();
+      clearRealtimeIdleFollowup();
       const lastTranscript = (rtcLastFinalTranscriptRef.current || "").trim();
       rtcResponseTimeoutRef.current = setTimeout(() => {
         setUploadStatus("⌛ Realtime ainda processando...");
@@ -1602,10 +1676,9 @@ async function confirmFounderHandoff() {
       }]));
     } catch {}
 
-    clearRealtimeIdleTimer();
-    rtcLastAssistantAtRef.current = Date.now();
     setUploadStatus('📝 ' + finalText.slice(0, 80) + (finalText.length > 80 ? '…' : ''));
     setTimeout(() => setUploadStatus(''), 2500);
+    setTimeout(() => { try { scheduleRealtimeIdleFollowup(); } catch {} }, REALTIME_REARM_AFTER_ASSISTANT_MS);
   }
 
 
@@ -1640,6 +1713,7 @@ async function stopRealtime(reason = 'client_stop') {
     const sid = rtcSessionIdRef.current;
     try {
       clearRealtimeResponseTimeout();
+      clearRealtimeIdleFollowup();
       rtcFallbackActiveRef.current = false;
       if (rtcFlushTimerRef.current) { try { clearInterval(rtcFlushTimerRef.current); } catch {} rtcFlushTimerRef.current = null; }
 
@@ -1842,9 +1916,6 @@ async function stopRealtime(reason = 'client_stop') {
           // Reiniciar microfone após fala (ciclo V2V)
           if (voiceModeRef.current && (speechSupported || mediaRecorderSupported) && !micEnabledRef.current) {
             startMic();
-          }
-          if (realtimeModeRef.current && !rtcFallbackActiveRef.current) {
-            setTimeout(() => scheduleRealtimeIdleFollowup('tts_end'), REALTIME_REARM_AFTER_ASSISTANT_MS);
           }
           resolve();
         };
@@ -2215,6 +2286,10 @@ async function stopRealtime(reason = 'client_stop') {
 
   const meName = user?.name || user?.email || "Você";
 
+  if (!onboardingChecked) {
+    return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#0f1115", color: "#fff", fontFamily: "system-ui" }}>Carregando sua experiência...</div>;
+  }
+
   return (
     <>
     <PWAInstallPrompt />
@@ -2226,6 +2301,84 @@ async function stopRealtime(reason = 'client_stop') {
         if (u) { u.terms_accepted_at = Math.floor(Date.now()/1000); u.terms_version = "2026-03-01"; localStorage.setItem("orkio_user", JSON.stringify(u)); }
       }} />
     )}
+
+{onboardingOpen && (
+  <div style={styles.modalBack} onClick={(e) => e.stopPropagation()}>
+    <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+      <div style={styles.modalTitle}>Complete seu onboarding</div>
+      <div style={styles.hint}>
+        Antes de continuar, precisamos de algumas informações para personalizar sua experiência no Summit.
+      </div>
+
+      <label style={{ ...styles.hint, display: "block", marginTop: 12 }}>Empresa</label>
+      <input
+        style={styles.input}
+        value={onboardingForm.company}
+        onChange={(e) => setOnboardingForm((prev) => ({ ...prev, company: e.target.value }))}
+        placeholder="Nome da empresa"
+      />
+
+      <label style={{ ...styles.hint, display: "block", marginTop: 10 }}>Seu papel</label>
+      <input
+        style={styles.input}
+        value={onboardingForm.role}
+        onChange={(e) => setOnboardingForm((prev) => ({ ...prev, role: e.target.value }))}
+        placeholder="Ex.: Founder, CTO, Investidor"
+      />
+
+      <label style={{ ...styles.hint, display: "block", marginTop: 10 }}>Perfil *</label>
+      <select
+        style={styles.select}
+        value={onboardingForm.user_type}
+        onChange={(e) => setOnboardingForm((prev) => ({ ...prev, user_type: e.target.value }))}
+      >
+        <option value="">Selecione</option>
+        <option value="founder">Founder</option>
+        <option value="investor">Investor</option>
+        <option value="operator">Operator</option>
+        <option value="partner">Partner</option>
+        <option value="other">Other</option>
+      </select>
+
+      <label style={{ ...styles.hint, display: "block", marginTop: 10 }}>Objetivo principal *</label>
+      <select
+        style={styles.select}
+        value={onboardingForm.intent}
+        onChange={(e) => setOnboardingForm((prev) => ({ ...prev, intent: e.target.value }))}
+      >
+        <option value="">Selecione</option>
+        <option value="explore">Explorar a plataforma</option>
+        <option value="meeting">Agendar conversa</option>
+        <option value="pilot">Avaliar piloto</option>
+        <option value="funding">Discutir investimento</option>
+        <option value="other">Outro</option>
+      </select>
+
+      <label style={{ ...styles.hint, display: "block", marginTop: 10 }}>Contexto adicional</label>
+      <textarea
+        style={{ ...styles.input, minHeight: 100, resize: "vertical" }}
+        value={onboardingForm.notes}
+        onChange={(e) => setOnboardingForm((prev) => ({ ...prev, notes: e.target.value }))}
+        placeholder="Conte em uma frase o que você quer resolver ou explorar."
+      />
+
+      {onboardingStatus ? (
+        <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,0.78)" }}>{onboardingStatus}</div>
+      ) : null}
+
+      <div style={styles.modalActions}>
+        <button
+          type="button"
+          style={{ ...styles.btn, ...styles.btnPrimary, opacity: onboardingBusy ? 0.75 : 1 }}
+          onClick={submitOnboarding}
+          disabled={onboardingBusy}
+        >
+          {onboardingBusy ? "Salvando..." : "Continuar"}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
     <div style={styles.layout}>
       {/* Sidebar */}
       <div style={{ ...styles.sidebar, display: isMobile ? "none" : "flex" }}>
