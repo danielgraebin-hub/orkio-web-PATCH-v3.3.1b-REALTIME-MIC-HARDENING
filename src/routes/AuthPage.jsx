@@ -119,8 +119,8 @@ export default function AuthPage() {
         org: tenant,
         body: {
           tenant,
-          email,
-          name,
+          email: emailNormalized,
+          name: (name || "").trim(),
           password,
           access_code: isExpectedSuperAdmin ? "" : accessCode,
           accept_terms: acceptTerms,
@@ -150,7 +150,15 @@ export default function AuthPage() {
         setTab("login");
       }
     } catch (e) {
-      setStatus(e.message || "Registration failed.");
+      const detail = (e?.message || "").toString();
+      if (/already registered/i.test(detail)) {
+        setPendingApproval(false);
+        setOtpMode(false);
+        setTab("login");
+        setStatus("Este e-mail já está cadastrado. Faça login ou use recuperar senha para continuar.");
+      } else {
+        setStatus(detail || "Registration failed.");
+      }
     } finally {
       setBusy(false);
     }
