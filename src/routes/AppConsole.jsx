@@ -155,6 +155,67 @@ function resolveRealtimeTranscriptionLanguage(languageProfile) {
   return raw;
 }
 
+
+
+const ONBOARDING_USER_TYPES = [
+  { value: "founder", label: "Founder" },
+  { value: "investor", label: "Investor" },
+  { value: "operator", label: "Operator" },
+  { value: "partner", label: "Partner" },
+  { value: "other", label: "Other" },
+];
+
+const ONBOARDING_INTENTS = [
+  { value: "explore", label: "Explorar a plataforma" },
+  { value: "meeting", label: "Agendar conversa" },
+  { value: "pilot", label: "Avaliar piloto" },
+  { value: "funding", label: "Discutir investimento" },
+  { value: "other", label: "Outro" },
+];
+
+function normalizeOnboardingUserType(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  const aliases = {
+    founder: "founder",
+    investor: "investor",
+    operator: "operator",
+    enterprise: "operator",
+    developer: "operator",
+    partner: "partner",
+    other: "other",
+  };
+  return aliases[raw] || "";
+}
+
+function normalizeOnboardingIntent(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  const aliases = {
+    explore: "explore",
+    exploring: "explore",
+    curious: "explore",
+    meeting: "meeting",
+    partnership: "meeting",
+    pilot: "pilot",
+    company_eval: "pilot",
+    funding: "funding",
+    investment: "funding",
+    other: "other",
+  };
+  return aliases[raw] || "";
+}
+
+function sanitizeOnboardingForm(data) {
+  return {
+    company: String(data?.company || "").trim(),
+    role: String(data?.role || data?.profile_role || "").trim(),
+    user_type: normalizeOnboardingUserType(data?.user_type),
+    intent: normalizeOnboardingIntent(data?.intent),
+    notes: String(data?.notes || "").trim(),
+  };
+}
+
 export default function AppConsole() {
 
   const SHOW_REALTIME_AUDIT = false;
@@ -180,13 +241,7 @@ const [onboardingChecked, setOnboardingChecked] = useState(false);
 const [onboardingOpen, setOnboardingOpen] = useState(false);
 const [onboardingBusy, setOnboardingBusy] = useState(false);
 const [onboardingStatus, setOnboardingStatus] = useState("");
-const [onboardingForm, setOnboardingForm] = useState({
-  company: "",
-  role: "",
-  user_type: "",
-  intent: "",
-  notes: "",
-});
+const [onboardingForm, setOnboardingForm] = useState(() => sanitizeOnboardingForm(user));
   const [health, setHealth] = useState("checking");
   const [isMobile, setIsMobile] = useState(typeof window !== "undefined" ? window.innerWidth <= 820 : false);
 
@@ -367,13 +422,7 @@ useEffect(() => {
         }
 
         if (!data?.onboarding_completed) {
-          setOnboardingForm({
-            company: data?.company || "",
-            role: data?.profile_role || "",
-            user_type: data?.user_type || "",
-            intent: data?.intent || "",
-            notes: data?.notes || "",
-          });
+          setOnboardingForm(sanitizeOnboardingForm(data));
           setOnboardingOpen(true);
         }
 
@@ -551,7 +600,8 @@ useEffect(() => {
 
 async function submitOnboarding() {
   if (onboardingBusy) return;
-  if (!(onboardingForm.user_type || "").trim() || !(onboardingForm.intent || "").trim()) {
+  const payload = sanitizeOnboardingForm(onboardingForm);
+  if (!payload.user_type || !payload.intent) {
     setOnboardingStatus("Preencha pelo menos seu perfil e objetivo.");
     return;
   }
@@ -563,20 +613,14 @@ async function submitOnboarding() {
       token,
       org: tenant,
       body: {
-        company: (onboardingForm.company || "").trim(),
-        role: (onboardingForm.role || "").trim(),
-        user_type: (onboardingForm.user_type || "").trim(),
-        intent: (onboardingForm.intent || "").trim(),
-        notes: (onboardingForm.notes || "").trim(),
+        ...payload,
         onboarding_completed: true,
       },
     });
 
-    const nextUser = data?.user || null;
-    if (nextUser) {
-      setUser(nextUser);
-      try { setSession({ token, user: nextUser, tenant }); } catch {}
-    }
+    const nextUser = data?.user || { ...(user || {}), ...payload, profile_role: payload.role, onboarding_completed: true };
+    setUser(nextUser);
+    try { setSession({ token, user: nextUser, tenant }); } catch {}
     setOnboardingOpen(false);
     setOnboardingStatus("");
     setUploadStatus("✅ Onboarding concluído.");
@@ -2333,11 +2377,9 @@ async function stopRealtime(reason = 'client_stop') {
         onChange={(e) => setOnboardingForm((prev) => ({ ...prev, user_type: e.target.value }))}
       >
         <option value="">Selecione</option>
-        <option value="founder">Founder</option>
-        <option value="investor">Investor</option>
-        <option value="operator">Operator</option>
-        <option value="partner">Partner</option>
-        <option value="other">Other</option>
+        {ONBOARDING_USER_TYPES.map((item) => (
+          <option key={item.value} value={item.value}>{item.label}</option>
+        ))}
       </select>
 
       <label style={{ ...styles.hint, display: "block", marginTop: 10 }}>Objetivo principal *</label>
@@ -2347,11 +2389,9 @@ async function stopRealtime(reason = 'client_stop') {
         onChange={(e) => setOnboardingForm((prev) => ({ ...prev, intent: e.target.value }))}
       >
         <option value="">Selecione</option>
-        <option value="explore">Explorar a plataforma</option>
-        <option value="meeting">Agendar conversa</option>
-        <option value="pilot">Avaliar piloto</option>
-        <option value="funding">Discutir investimento</option>
-        <option value="other">Outro</option>
+        {ONBOARDING_INTENTS.map((item) => (
+          <option key={item.value} value={item.value}>{item.label}</option>
+        ))}
       </select>
 
       <label style={{ ...styles.hint, display: "block", marginTop: 10 }}>Contexto adicional</label>
