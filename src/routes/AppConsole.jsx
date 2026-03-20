@@ -1,93 +1,16 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch, uploadFile, chat, chatStream, transcribeAudio, requestFounderHandoff, getRealtimeClientSecret as apiGetRealtimeClientSecret, startRealtimeSession as apiStartRealtimeSession, startSummitSession as apiStartSummitSession, postRealtimeEventsBatch as apiPostRealtimeEventsBatch, endRealtimeSession as apiEndRealtimeSession, getRealtimeSession as apiGetRealtimeSession, getSummitSessionScore as apiGetSummitSessionScore, submitSummitSessionReview as apiSubmitSummitSessionReview, downloadRealtimeAta as downloadRealtimeAtaFile, guardRealtimeTranscript as apiGuardRealtimeTranscript, getMe } from "../ui/api.js";
-import { clearSession, getTenant, getToken, getUser, isAdmin, isApproved, setUser as persistUser, hasCompletedOnboarding } from "../lib/auth.js";
+import { apiFetch, uploadFile, chat, chatStream, transcribeAudio, requestFounderHandoff, getRealtimeClientSecret, startRealtimeSession, startSummitSession, postRealtimeEventsBatch, endRealtimeSession, getRealtimeSession, getSummitSessionScore, submitSummitSessionReview, downloadRealtimeAta as downloadRealtimeAtaFile, guardRealtimeTranscript } from "../ui/api.js";
+import { clearSession, getTenant, getToken, getUser, isAdmin } from "../lib/auth.js";
 import { ORKIO_VOICES, coerceVoiceId } from "../lib/voices.js";
 import TermsModal from "../ui/TermsModal.jsx";
 import PWAInstallPrompt from "../components/PWAInstallPrompt.jsx";
-import OnboardingModal from "../components/OnboardingModal.jsx";
 
 const ORKIO_ENV = (typeof window !== "undefined" && window.__ORKIO_ENV__) ? window.__ORKIO_ENV__ : {};
 const SUMMIT_VOICE_MODE = ((ORKIO_ENV.VITE_SUMMIT_VOICE_MODE || import.meta.env.VITE_SUMMIT_VOICE_MODE || "realtime").trim().toLowerCase() === "stt_tts")
   ? "stt_tts"
   : "realtime";
 const SPEECH_RECOGNITION_LANG = ((ORKIO_ENV.VITE_SPEECH_RECOGNITION_LANG || import.meta.env.VITE_SPEECH_RECOGNITION_LANG || "en-US").trim() || "en-US");
-
-const MOBILE_UA = (typeof navigator !== "undefined" ? (navigator.userAgent || "") : "").toLowerCase();
-const IS_IOS_DEVICE = /iphone|ipad|ipod/.test(MOBILE_UA);
-const IS_ANDROID_DEVICE = /android/.test(MOBILE_UA);
-const IS_SAMSUNG_DEVICE = /sm-|samsungbrowser|samsung/.test(MOBILE_UA);
-const IS_XIAOMI_DEVICE = /mi |mibrowser|redmi|poco|xiaomi/.test(MOBILE_UA);
-const IS_MOBILE_DEVICE = IS_IOS_DEVICE || IS_ANDROID_DEVICE;
-const REALTIME_MAGICWORDS_ENABLED = ((ORKIO_ENV.VITE_REALTIME_MAGICWORDS || import.meta.env.VITE_REALTIME_MAGICWORDS || "true").toString().trim().toLowerCase() !== "false");
-const REALTIME_TRANSCRIPT_MIN_CHARS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_MIN_CHARS || import.meta.env.VITE_REALTIME_MIN_CHARS || (IS_MOBILE_DEVICE ? "4" : "3"), 10);
-const REALTIME_TRANSCRIPT_ARM_DEBOUNCE_MS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_ARM_DEBOUNCE_MS || import.meta.env.VITE_REALTIME_ARM_DEBOUNCE_MS || (IS_IOS_DEVICE ? "420" : "320"), 10);
-const REALTIME_MAGIC_DEBOUNCE_MS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_MAGIC_DEBOUNCE_MS || import.meta.env.VITE_REALTIME_MAGIC_DEBOUNCE_MS || "1800", 10);
-const REALTIME_READY_STATUS_MS = Number.parseInt(ORKIO_ENV.VITE_REALTIME_READY_STATUS_MS || import.meta.env.VITE_REALTIME_READY_STATUS_MS || "1600", 10);
-const REALTIME_COOLDOWN_AFTER_REPLY_MS = Number.parseInt(
-  ORKIO_ENV.VITE_REALTIME_COOLDOWN_AFTER_REPLY_MS ||
-  import.meta.env.VITE_REALTIME_COOLDOWN_AFTER_REPLY_MS ||
-  (IS_IOS_DEVICE ? "2200" : (IS_ANDROID_DEVICE ? "1800" : "1900")),
-  10
-);
-const REALTIME_RESTART_AFTER_TTS_MS = Number.parseInt(
-  ORKIO_ENV.VITE_REALTIME_RESTART_AFTER_TTS_MS ||
-  import.meta.env.VITE_REALTIME_RESTART_AFTER_TTS_MS ||
-  (IS_IOS_DEVICE ? "900" : "650"),
-  10
-);
-
-function normalizeRealtimeTranscript(raw) {
-  return (raw || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function shouldIgnoreRealtimeTranscript(raw) {
-  const clean = normalizeRealtimeTranscript(raw);
-  if (!clean) return true;
-  if (clean.length < Math.max(1, REALTIME_TRANSCRIPT_MIN_CHARS)) return true;
-  const compact = clean.replace(/\s+/g, "");
-  if (compact.length < Math.max(2, REALTIME_TRANSCRIPT_MIN_CHARS - 1)) return true;
-  if (/^(h+|hm+|hmm+|uh+|um+|mm+|ahn+|ah+|eh+|oi+|ok+)$/i.test(compact)) return true;
-  const tokens = clean.split(" ").filter(Boolean);
-  if (tokens.length === 1 && compact.length <= 2) return true;
-  if (/^(continue|please|prossiga|por favor)$/.test(clean)) return false;
-  return false;
-}
-
-function buildMobileAudioConstraints() {
-  const audio = {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
-    channelCount: 1,
-  };
-
-  if (IS_IOS_DEVICE) {
-    audio.sampleRate = 48000;
-    audio.latency = 0.02;
-  }
-
-  if (IS_SAMSUNG_DEVICE || IS_XIAOMI_DEVICE) {
-    audio.sampleRate = 48000;
-    audio.latency = 0.02;
-  }
-
-  if (IS_ANDROID_DEVICE && !IS_SAMSUNG_DEVICE && !IS_XIAOMI_DEVICE) {
-    audio.sampleRate = 48000;
-  }
-
-  return { audio, video: false };
-}
-
-
-const SELECT_OPTION_STYLE = { backgroundColor: "#0f172a", color: "#ffffff" };
-
 
 
 // Icons (inline SVG)
@@ -195,7 +118,7 @@ function formatDateTime(ts) {
       }
     }
     const d = new Date(ms);
-    return new Intl.DateTimeFormat("en-US", {
+    return new Intl.DateTimeFormat("pt-BR", {
       timeZone: "America/Sao_Paulo",
       hour12: false,
       year: "numeric",
@@ -219,18 +142,6 @@ function resolveRealtimeTranscriptionLanguage(languageProfile) {
   return raw;
 }
 
-function resolveSttLanguage(languageProfile) {
-  const raw = (languageProfile || "").trim();
-  if (!raw) return "";
-  const norm = raw.replace(/_/g, "-").toLowerCase();
-  if (norm === "auto") return "";
-  if (norm === "pt-br" || norm === "pt-pt" || norm === "pt") return "pt";
-  if (norm === "en-us" || norm === "en-gb" || norm === "en") return "en";
-  if (norm === "es-es" || norm === "es-mx" || norm === "es") return "es";
-  if (norm === "fr-fr" || norm === "fr") return "fr";
-  return norm.includes("-") ? norm.split("-")[0] : norm;
-}
-
 export default function AppConsole() {
 
   const SHOW_REALTIME_AUDIT = false;
@@ -251,8 +162,6 @@ React.useEffect(() => {
   const [tenant, setTenant] = useState(getTenant() || "public");
   const [token, setToken] = useState(getToken());
   const [user, setUser] = useState(getUser());
-  const [profileReady, setProfileReady] = useState(false);
-  const [showOnboarding, setShowOnboarding] = useState(false);
   const [health, setHealth] = useState("checking");
   const [isMobile, setIsMobile] = useState(typeof window !== "undefined" ? window.innerWidth <= 820 : false);
 
@@ -299,7 +208,7 @@ React.useEffect(() => {
   const voiceModeRef = useRef(SUMMIT_VOICE_MODE === "stt_tts");
   const [ttsPlaying, setTtsPlaying] = useState(false);
   const ttsAudioRef = useRef(null);
-  const [ttsVoice, setTtsVoice] = useState(coerceVoiceId((localStorage.getItem('orkio_tts_voice') || ORKIO_ENV.VITE_REALTIME_VOICE || 'cedar')));
+  const [ttsVoice, setTtsVoice] = useState(localStorage.getItem('orkio_tts_voice') || 'nova');
   const lastSpokenMsgRef = useRef('');
   // PATCH0100_14: agent info from last chat response (for voice/avatar)
   const [lastAgentInfo, setLastAgentInfo] = useState(null);
@@ -326,17 +235,12 @@ React.useEffect(() => {
   const rtcAssistantFinalCommittedRef = useRef(false);
   const rtcResponseTimeoutRef = useRef(null);
   const rtcFallbackActiveRef = useRef(false);
-  const rtcArmTimerRef = useRef(null);
-  const rtcLastTranscriptAtRef = useRef(0);
-  const rtcLastResponseFinishedAtRef = useRef(0);
-  const rtcLastTriggerAtRef = useRef(0);
 
   // PATCH0100_27A: Realtime persistence (audit)
   const rtcSessionIdRef = useRef(null);
   const rtcThreadIdRef = useRef(null);
   const rtcEventQueueRef = useRef([]);
   const rtcFlushTimerRef = useRef(null);
-  const rtcAuthLostRef = useRef(false);
   // PATCH0100_27_2B: UI log + punct status
   const [rtcAuditEvents, setRtcAuditEvents] = useState([]);
   const [rtcPunctStatus, setRtcPunctStatus] = useState(null); // null | 'pending' | 'done' | 'timeout'
@@ -402,129 +306,17 @@ const closeCapacityModal = () => {
     navigator.mediaDevices?.getUserMedia
   ));
 
-
-  function isRealtimeAuthError(err) {
-    const status = Number(err?.status || err?.response?.status || err?.cause?.status || 0);
-    if (status === 401) return true;
-    const msg = String(err?.message || err?.detail || "").toLowerCase();
-    return msg.includes("401") || msg.includes("unauthorized") || msg.includes("not authenticated") || msg.includes("jwt");
-  }
-
-  async function realtimeApi(path, { method = "POST", body, signal } = {}) {
-    try {
-      const res = await apiFetch(path, { method, token, org: tenant, body, signal });
-      if (rtcAuthLostRef.current) rtcAuthLostRef.current = false;
-      return res?.data ?? res;
-    } catch (err) {
-      if (isRealtimeAuthError(err)) {
-        rtcAuthLostRef.current = true;
-        try { clearRealtimeResponseTimeout(); } catch {}
-        try { if (rtcFlushTimerRef.current) { clearInterval(rtcFlushTimerRef.current); rtcFlushTimerRef.current = null; } } catch {}
-        try { setRtcReadyToRespond(false); } catch {}
-        try { setRealtimeMode(false); } catch {}
-        realtimeModeRef.current = false;
-        try { setV2vPhase("error"); } catch {}
-        try { setV2vError("REALTIME_AUTH_401"); } catch {}
-        try { setUploadStatus("Sessão expirada no realtime. Faça login novamente."); } catch {}
-      }
-      throw err;
-    }
-  }
-
-  async function getRealtimeClientSecret(payload) {
-    return await realtimeApi("/api/realtime/client_secret", { method: "POST", body: payload });
-  }
-
-  async function startRealtimeSession(payload) {
-    return await realtimeApi("/api/realtime/start", { method: "POST", body: payload });
-  }
-
-  async function startSummitSession(payload) {
-    const body = { ...(payload || {}), mode: "summit" };
-    return await realtimeApi("/api/realtime/start", { method: "POST", body });
-  }
-
-  async function postRealtimeEventsBatch(payload) {
-    return await realtimeApi("/api/realtime/events:batch", { method: "POST", body: payload });
-  }
-
-  async function endRealtimeSession(payload) {
-    if (rtcAuthLostRef.current) return { ok: false, skipped: "auth_lost" };
-    return await realtimeApi("/api/realtime/end", { method: "POST", body: payload });
-  }
-
-  async function getRealtimeSession(payload) {
-    if (!payload?.session_id) throw new Error("session_id obrigatório");
-    const sid = encodeURIComponent(payload.session_id);
-    const finalsOnly = payload?.finals_only === false ? "false" : "true";
-    return await realtimeApi(`/api/realtime/sessions/${sid}?finals_only=${finalsOnly}`, { method: "GET" });
-  }
-
-  async function getSummitSessionScore(payload) {
-    if (!payload?.session_id) throw new Error("session_id obrigatório");
-    const sid = encodeURIComponent(payload.session_id);
-    return await realtimeApi(`/api/realtime/sessions/${sid}/score`, { method: "GET" });
-  }
-
-  async function submitSummitSessionReview(payload) {
-    if (!payload?.session_id) throw new Error("session_id obrigatório");
-    const sid = encodeURIComponent(payload.session_id);
-    const { session_id, ...body } = payload || {};
-    return await realtimeApi(`/api/realtime/sessions/${sid}/review`, { method: "POST", body });
-  }
-
-  async function guardRealtimeTranscript(payload) {
-    return await realtimeApi("/api/realtime/guard", { method: "POST", body: payload });
-  }
-
   useEffect(() => {
-    let alive = true;
-    async function bootstrapProfile() {
-      const t = getToken();
-      const u = getUser();
-      setToken(t);
-      setUser(u);
-      if (!t) {
-        nav("/auth");
-        return;
-      }
-      if (u && !isApproved(u)) {
-        clearSession();
-        nav("/auth");
-        return;
-      }
-      try {
-        const { data } = await getMe({ token: t, org: getTenant() || "public" });
-        if (!alive || !data) return;
-        persistUser(data);
-        setUser(data);
-        if (!isApproved(data)) {
-          clearSession();
-          nav("/auth");
-          return;
-        }
-        const normalizedEmail = (data?.email || "").trim().toLowerCase();
-        const isExpectedSuperAdmin = normalizedEmail === "daniel@patroai.com";
-        const isPrivilegedUser = isExpectedSuperAdmin || data?.role === "admin" || data?.role === "super_admin";
-        setShowOnboarding(isPrivilegedUser ? false : !hasCompletedOnboarding(data));
-        if (!data.terms_accepted_at) {
-          setShowTermsModal(true);
-        }
-      } catch (e) {
-        console.warn("PROFILE_BOOTSTRAP_FAILED", e);
-        setHealth("down");
-        clearSession();
-        if (alive) setProfileReady(false);
-        nav("/auth");
-        return;
-      } finally {
-        if (alive && getToken()) setProfileReady(true);
-      }
+    const t = getToken();
+    const u = getUser();
+    setToken(t);
+    setUser(u);
+    if (!t) nav("/auth");
+    // PATCH0100_28: Check if user needs to accept terms
+    if (t && u && !u.terms_accepted_at) {
+      setShowTermsModal(true);
     }
-    bootstrapProfile();
-    return () => { alive = false; };
   }, []);
-
 
 
   useEffect(() => {
@@ -535,19 +327,6 @@ const closeCapacityModal = () => {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
-
-  useEffect(() => {
-    return () => {
-      try { if (rtcArmTimerRef.current) clearTimeout(rtcArmTimerRef.current); } catch {}
-    };
-  }, []);
-
-
-function handleOnboardingComplete(nextUser) {
-  persistUser(nextUser);
-  setUser(nextUser);
-  setShowOnboarding(false);
-}
 
   useEffect(() => {
     if (SUMMIT_VOICE_MODE === "stt_tts") {
@@ -687,12 +466,12 @@ useEffect(() => {
   }
 
   useEffect(() => {
-    if (!token || showOnboarding) return;
+    if (!token) return;
     loadThreads();
     loadAgents();
-  }, [token, tenant, showOnboarding]);
+  }, [token, tenant]);
 
-  useEffect(() => { if (threadId && !showOnboarding) loadMessages(threadId); }, [threadId, showOnboarding]);
+  useEffect(() => { if (threadId) loadMessages(threadId); }, [threadId]);
 
   async function createThread() {
     try {
@@ -948,7 +727,7 @@ useEffect(() => {
         // BUG-01 FIX: fallback — se playTts não reiniciou o mic (ex: autoplay bloqueado)
         // garantir que o ciclo V2V continua ouvindo
         if (voiceModeRef.current && !micEnabledRef.current) {
-          setTimeout(() => startMic(), REALTIME_RESTART_AFTER_TTS_MS);
+          setTimeout(() => startMic(), 300);
         }
       }
 
@@ -1054,7 +833,7 @@ useEffect(() => {
             console.info('[V2V] v2v_record_received trace_id=%s size=%d', trace, blob.size);
 
             try {
-              const sttLang = resolveSttLanguage((window.__ORKIO_ENV__?.VITE_STT_LANGUAGE || window.__ORKIO_ENV__?.VITE_REALTIME_TRANSCRIBE_LANGUAGE || import.meta.env.VITE_STT_LANGUAGE || import.meta.env.VITE_REALTIME_TRANSCRIBE_LANGUAGE || "").trim());
+              const sttLang = (window.__ORKIO_ENV__?.VITE_STT_LANGUAGE || window.__ORKIO_ENV__?.VITE_REALTIME_TRANSCRIBE_LANGUAGE || import.meta.env.VITE_STT_LANGUAGE || import.meta.env.VITE_REALTIME_TRANSCRIBE_LANGUAGE || "").trim();
               const result = await transcribeAudio(blob, { token, org: tenant, trace_id: trace, language: sttLang || null });
               const text = (result?.text || '').trim();
               console.info('[V2V] v2v_stt_ok trace_id=%s chars=%d preview=%s', trace, text.length, text.slice(0, 60));
@@ -1196,7 +975,7 @@ useEffect(() => {
             setMicEnabled(false);
             sendMessage();
           }
-        }, Math.max(1500, REALTIME_TRANSCRIPT_ARM_DEBOUNCE_MS + 900));
+        }, 1500);
       }
     };
 
@@ -1362,7 +1141,6 @@ async function confirmFounderHandoff() {
       setUploadStatus('⚡ Conectando Realtime (WebRTC)...');
 
       // Close any previous session
-      rtcAuthLostRef.current = false;
       await stopRealtime('restart');
 
       try { setRtcAuditEvents([]); } catch {}
@@ -1374,7 +1152,7 @@ async function confirmFounderHandoff() {
       const ORKIO_ENV = (typeof window !== "undefined" && window.__ORKIO_ENV__) ? window.__ORKIO_ENV__ : {};
       const envVoice = (ORKIO_ENV.VITE_REALTIME_VOICE || import.meta.env.VITE_REALTIME_VOICE || "").trim();
       const rtModel = (ORKIO_ENV.VITE_REALTIME_MODEL || import.meta.env.VITE_REALTIME_MODEL || "gpt-realtime-mini").trim();
-      const magicEnabled = REALTIME_MAGICWORDS_ENABLED;
+      const magicEnabled = (ORKIO_ENV.VITE_REALTIME_MAGICWORDS || import.meta.env.VITE_REALTIME_MAGICWORDS || "true").toString().trim().toLowerCase() !== "false";
       rtcMagicEnabledRef.current = magicEnabled;
 
       // Voice priority: agent.voice_id (Admin) > env default > fallback ("cedar")
@@ -1435,7 +1213,7 @@ async function confirmFounderHandoff() {
       };
 
       // Mic input
-      const ms = await navigator.mediaDevices.getUserMedia(buildMobileAudioConstraints());
+      const ms = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       const track = ms.getTracks()[0];
       pc.addTrack(track, ms);
 
@@ -1451,7 +1229,7 @@ async function confirmFounderHandoff() {
         // Summit language hint is locked to English unless explicitly overridden by env.
         try {
           const envLang = (window.__ORKIO_ENV__?.VITE_REALTIME_TRANSCRIBE_LANGUAGE || import.meta.env.VITE_REALTIME_TRANSCRIBE_LANGUAGE || "").trim();
-          const preferredLang = envLang || (summitRuntimeModeRef.current === "summit" ? (summitLanguageProfileRef.current || "") : "");
+          const preferredLang = summitRuntimeModeRef.current === "summit" ? (summitLanguageProfileRef.current || envLang || "") : envLang;
           const langHint = resolveRealtimeTranscriptionLanguage(preferredLang);
           const transcription = { model: "gpt-4o-mini-transcribe" };
           if (langHint) transcription.language = langHint;
@@ -1474,70 +1252,38 @@ async function confirmFounderHandoff() {
           const ev = JSON.parse(e.data);
 
                     // Turn arming + optional Magic Words (B3)
-          // Backend remains with create_response=false, so the frontend must explicitly send
-          // response.create after a valid final transcript. This now happens automatically in the
-          // normal path, not only via click, hotkey, or magic word.
+          // We DO NOT auto-respond (create_response=false). We arm the turn on final transcript and
+          // only create a response when the user clicks, presses a hotkey, or speaks a magic word.
           if (ev?.type === 'conversation.item.input_audio_transcription.completed') {
             const raw = (ev?.transcript || ev?.text || ev?.result?.transcript || '').toString();
             queueRealtimeEvent({ event_type: 'transcript.final', role: 'user', content: raw, is_final: true });
             try {} catch {}
-            if (shouldIgnoreRealtimeTranscript(raw)) {
-              rtcLastFinalTranscriptRef.current = '';
-              setRtcReadyToRespond(false);
-              setUploadStatus('Listening…');
-              setTimeout(() => setUploadStatus(''), 900);
-            } else {
-              const now = Date.now();
-              if ((now - rtcLastResponseFinishedAtRef.current) < REALTIME_COOLDOWN_AFTER_REPLY_MS) {
-                rtcLastFinalTranscriptRef.current = '';
-                setRtcReadyToRespond(false);
-                return;
-              }
-              rtcLastFinalTranscriptRef.current = raw;
-              Promise.resolve(guardAndMaybeBlockRealtimeTranscript(raw)).then((blocked) => {
-                if (blocked) return;
-                const norm = normalizeRealtimeTranscript(raw);
-                const endsWithCmd = (s, cmd) => s === cmd || s.endsWith(' ' + cmd);
-                const isMagic = endsWithCmd(norm, 'continue') || endsWithCmd(norm, 'please') || endsWithCmd(norm, 'prossiga') || endsWithCmd(norm, 'por favor');
-                if (rtcArmTimerRef.current) {
-                  try { clearTimeout(rtcArmTimerRef.current); } catch {}
+            rtcLastFinalTranscriptRef.current = raw;
+
+            Promise.resolve(guardAndMaybeBlockRealtimeTranscript(raw)).then((blocked) => {
+              if (blocked) return;
+              setRtcReadyToRespond(!!raw.trim());
+              const norm = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+              const endsWithCmd = (s, cmd) => s === cmd || s.endsWith(' ' + cmd);
+              const isMagic = endsWithCmd(norm, 'continue') || endsWithCmd(norm, 'please') || endsWithCmd(norm, 'prossiga') || endsWithCmd(norm, 'por favor');
+              if (rtcMagicEnabledRef.current && isMagic) {
+                try {
+                  if (rtcLastMagicRef.current !== norm) {
+                    rtcLastMagicRef.current = norm;
+                    triggerRealtimeResponse("magic");
+                  }
+                } catch (err) {
+                  console.warn('[Realtime] magic trigger failed', err);
                 }
-                rtcArmTimerRef.current = setTimeout(() => {
-                  const now = Date.now();
-                  const canArm = !!raw.trim();
-                  setRtcReadyToRespond(canArm);
-
-                  if (!canArm) {
-                    setRtcReadyToRespond(false);
-                    return;
-                  }
-
-                  if (rtcMagicEnabledRef.current && isMagic) {
-                    try {
-                      if ((now - rtcLastTranscriptAtRef.current) < REALTIME_MAGIC_DEBOUNCE_MS && rtcLastMagicRef.current === norm) {
-                        return;
-                      }
-                      rtcLastTranscriptAtRef.current = now;
-                      rtcLastMagicRef.current = norm;
-                      triggerRealtimeResponse("magic");
-                      return;
-                    } catch (err) {
-                      console.warn('[Realtime] magic trigger failed', err);
-                      if (raw.trim()) {
-                        void sendMessage(raw, { explicitVoiceRequested: true, realtimeTurn: true });
-                      }
-                      return;
-                    }
-                  }
-
-                  rtcLastTranscriptAtRef.current = now;
-                  triggerRealtimeResponse("auto");
-                }, Math.max(120, REALTIME_TRANSCRIPT_ARM_DEBOUNCE_MS));
-              });
-            }
+              } else if (raw.trim()) {
+                setUploadStatus('Ready to respond — click ▶️ or press Space/Enter.');
+                setTimeout(() => setUploadStatus(''), 1800);
+              }
+            });
           }
 // Basic telemetry + optional live captions
           if (ev?.type === 'response.text.delta' && ev?.delta) {
+            clearRealtimeResponseTimeout();
             rtcTextBufRef.current += ev.delta;
           }
           if (ev?.type === 'response.created') {
@@ -1547,6 +1293,12 @@ async function confirmFounderHandoff() {
             rtcLastAssistantFinalRef.current = '';
             rtcAssistantFinalCommittedRef.current = false;
           }
+          if (ev?.type === 'response.output_item.added') {
+            clearRealtimeResponseTimeout();
+          }
+          if (ev?.type === 'response.content_part.added') {
+            clearRealtimeResponseTimeout();
+          }
           if (ev?.type === 'response.text.done') {
             clearRealtimeResponseTimeout();
             const t = (rtcTextBufRef.current || '').trim();
@@ -1555,7 +1307,11 @@ async function confirmFounderHandoff() {
             commitRealtimeAssistantFinal(t, { source: 'response.text.done' });
           }
           // Audio transcript (when model outputs audio without text)
+          if (ev?.type === 'response.audio.delta') {
+            clearRealtimeResponseTimeout();
+          }
           if (ev?.type === 'response.audio_transcript.delta' && ev?.delta) {
+            clearRealtimeResponseTimeout();
             rtcAudioTranscriptBufRef.current = (rtcAudioTranscriptBufRef.current || '') + ev.delta;
           }
           if (ev?.type === 'response.audio_transcript.done' || ev?.type === 'response.audio_transcript.final') {
@@ -1573,30 +1329,6 @@ async function confirmFounderHandoff() {
             setV2vError(ev?.error?.message || 'Erro Realtime');
             setV2vPhase('error');
             void activateSilentRealtimeFallback('realtime_error');
-          }
-
-          if (ev?.type === 'response.created') {
-            clearRealtimeResponseTimeout();
-          }
-
-          if (ev?.type === 'response.output_item.added') {
-            clearRealtimeResponseTimeout();
-          }
-
-          if (ev?.type === 'response.content_part.added') {
-            clearRealtimeResponseTimeout();
-          }
-
-          if (ev?.type === 'response.text.delta' && ev?.delta) {
-            clearRealtimeResponseTimeout();
-          }
-
-          if (ev?.type === 'response.audio.delta') {
-            clearRealtimeResponseTimeout();
-          }
-
-          if (ev?.type === 'response.audio_transcript.delta' && ev?.delta) {
-            clearRealtimeResponseTimeout();
           }
         } catch {}
       });
@@ -1635,14 +1367,6 @@ async function confirmFounderHandoff() {
   
   function triggerRealtimeResponse(reason = "manual") {
     try {
-      const now = Date.now();
-      if ((now - rtcLastTriggerAtRef.current) < 900) {
-        return;
-      }
-      if ((now - rtcLastResponseFinishedAtRef.current) < REALTIME_COOLDOWN_AFTER_REPLY_MS) {
-        return;
-      }
-      rtcLastTriggerAtRef.current = now;
       const dc = rtcDcRef.current;
       if (!dc || dc.readyState !== "open") {
         throw new Error("DataChannel não está aberto");
@@ -1650,8 +1374,6 @@ async function confirmFounderHandoff() {
       clearRealtimeResponseTimeout();
       const lastTranscript = (rtcLastFinalTranscriptRef.current || "").trim();
       rtcResponseTimeoutRef.current = setTimeout(() => {
-        // Não destruir o realtime por timeout curto.
-        // Apenas sinalizar atraso de resposta.
         setUploadStatus("⌛ Realtime ainda processando...");
         setTimeout(() => setUploadStatus(""), 1200);
       }, 7000);
@@ -1698,7 +1420,6 @@ async function confirmFounderHandoff() {
   }
 
   async function flushRealtimeEvents() {
-    if (rtcAuthLostRef.current) return;
     const sid = rtcSessionIdRef.current;
     if (!sid) return;
     const q = rtcEventQueueRef.current || [];
@@ -1717,7 +1438,6 @@ async function confirmFounderHandoff() {
 
   // PATCH0100_27_2B: finalize session on server + poll punctuated finals (best-effort)
   async function finalizeRealtimeSession(reason = 'client_stop') {
-    if (rtcAuthLostRef.current) return;
     const sid = rtcSessionIdRef.current;
     if (!sid) return;
     // stop timer
@@ -1780,7 +1500,6 @@ async function confirmFounderHandoff() {
       }]));
     } catch {}
 
-    rtcLastResponseFinishedAtRef.current = Date.now();
     setUploadStatus('📝 ' + finalText.slice(0, 80) + (finalText.length > 80 ? '…' : ''));
     setTimeout(() => setUploadStatus(''), 2500);
   }
@@ -1821,7 +1540,7 @@ async function stopRealtime(reason = 'client_stop') {
       if (rtcFlushTimerRef.current) { try { clearInterval(rtcFlushTimerRef.current); } catch {} rtcFlushTimerRef.current = null; }
 
       try {
-        if (sid && !rtcAuthLostRef.current) {
+        if (sid) {
           await flushRealtimeEvents();
           await endRealtimeSession({ session_id: sid, ended_at: Date.now(), meta: { reason, mode: summitRuntimeModeRef.current } });
           try {
@@ -1863,8 +1582,6 @@ async function stopRealtime(reason = 'client_stop') {
       rtcAudioTranscriptBufRef.current = '';
       rtcAssistantFinalCommittedRef.current = false;
       rtcLastAssistantFinalRef.current = '';
-      rtcLastResponseFinishedAtRef.current = 0;
-      rtcLastTriggerAtRef.current = 0;
     } catch {}
   }
 
@@ -2042,7 +1759,7 @@ async function stopRealtime(reason = 'client_stop') {
           ttsAudioRef.current = null;
           // BUG-01 FIX: reiniciar mic mesmo sem áudio — ciclo V2V não pode morrer aqui
           if (voiceModeRef.current && !micEnabledRef.current) {
-            setTimeout(() => startMic(), REALTIME_RESTART_AFTER_TTS_MS);
+            setTimeout(() => startMic(), 300);
           }
           resolve(); // não rejeitar — V2V deve continuar mesmo sem áudio
         });
@@ -2392,10 +2109,7 @@ async function stopRealtime(reason = 'client_stop') {
   const meName = user?.name || user?.email || "Você";
 
   return (
-<>
-  {profileReady && showOnboarding && user && (
-    <OnboardingModal user={user} onComplete={handleOnboardingComplete} />
-  )}
+    <>
     <PWAInstallPrompt />
     {showTermsModal && (
       <TermsModal onAccepted={() => {
@@ -2488,20 +2202,20 @@ async function stopRealtime(reason = 'client_stop') {
 
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <select style={styles.select} value={destMode} onChange={(e) => setDestMode(e.target.value)}>
-              <option value="team" style={SELECT_OPTION_STYLE}>Team</option>
-              <option value="single" style={SELECT_OPTION_STYLE}>1 agente</option>
-              <option value="multi" style={SELECT_OPTION_STYLE}>multi</option>
+              <option value="team">Team</option>
+              <option value="single">1 agente</option>
+              <option value="multi">multi</option>
             </select>
 
             {destMode === "single" ? (
               <select style={styles.select} value={destSingle} onChange={(e) => setDestSingle(e.target.value)}>
-                {agents.map(a => <option key={a.id} value={a.id} style={SELECT_OPTION_STYLE}>{a.name}{a.is_default ? " (default)" : ""}</option>)}
+                {agents.map(a => <option key={a.id} value={a.id}>{a.name}{a.is_default ? " (default)" : ""}</option>)}
               </select>
             ) : null}
 
             {destMode === "multi" && !isMobile ? (
               <select style={styles.select} value="choose" onChange={() => {}}>
-                <option value="choose" style={SELECT_OPTION_STYLE}>Selecionar no envio...</option>
+                <option value="choose">Selecionar no envio...</option>
               </select>
             ) : null}
           </div>
@@ -2732,17 +2446,24 @@ async function stopRealtime(reason = 'client_stop') {
             </div>
           </div>
 
-{/* Summit voice status — single visible mode only */}
-{voiceMode && SUMMIT_VOICE_MODE === "stt_tts" && !isMobile && (
-  <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 8px", fontSize: "12px", color: "rgba(255,255,255,0.7)", flexWrap: "wrap" }}>
-    {lastAgentInfo?.avatar_url && (
-      <img src={lastAgentInfo.avatar_url} alt="" style={{ width: 24, height: 24, borderRadius: "50%", objectFit: "cover" }} onError={(e) => { e.target.style.display = 'none'; }} />
-    )}
-    {lastAgentInfo?.agent_name && <span style={{ fontWeight: 600, color: "rgba(255,255,255,0.85)" }}>{lastAgentInfo.agent_name}</span>}
-    <span>🔊 Voice:</span>
-    <span style={{ ...styles.select, padding: "4px 8px", fontSize: "11px", minWidth: 120, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
-      {ORKIO_VOICES.find(v => v.id === ttsVoice)?.label || ttsVoice}
-    </span>
+          {/* Voice Mode controls — PATCH0100_14 enhanced */}
+          {voiceMode && SUMMIT_VOICE_MODE === "stt_tts" && !isMobile && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 8px", fontSize: "12px", color: "rgba(255,255,255,0.7)", flexWrap: "wrap" }}>
+              {lastAgentInfo?.avatar_url && (
+                <img src={lastAgentInfo.avatar_url} alt="" style={{ width: 24, height: 24, borderRadius: "50%", objectFit: "cover" }} onError={(e) => { e.target.style.display = 'none'; }} />
+              )}
+              {lastAgentInfo?.agent_name && <span style={{ fontWeight: 600, color: "rgba(255,255,255,0.85)" }}>{lastAgentInfo.agent_name}</span>}
+              <span>🔊 Voz:</span>
+              <select
+                value={ttsVoice}
+                onChange={(e) => changeTtsVoice(e.target.value)}
+                style={{ ...styles.select, padding: "4px 8px", fontSize: "11px" }}
+              >
+                <option value="auto">Auto (voz do agente)</option>
+                {ORKIO_VOICES.map(v => (
+                  <option key={v.id} value={v.id}>{v.label}</option>
+                ))}
+</select>
               {ttsPlaying && (
                 <button
                   onClick={stopTts}
@@ -2752,7 +2473,7 @@ async function stopRealtime(reason = 'client_stop') {
                 </button>
               )}
               <span style={{ opacity: 0.6 }}>
-                {micEnabled ? "🔴 Listening..." : ttsPlaying ? "🔊 Speaking..." : "⏸ Waiting"}
+                {micEnabled ? "🔴 Ouvindo..." : ttsPlaying ? "🔊 Falando..." : "⏸ Aguardando"}
               </span>
               {!!(rtcSessionIdRef.current || rtcAuditEvents?.length) && (
                 <button
