@@ -1,21 +1,66 @@
 import React, { useMemo, useState } from "react";
 import { getTenant, getToken } from "../lib/auth.js";
 
+
 const USER_TYPES = [
-  { value: "investor", label: "Investor" },
   { value: "founder", label: "Founder" },
-  { value: "enterprise", label: "Enterprise" },
-  { value: "developer", label: "Developer" },
+  { value: "investor", label: "Investor" },
+  { value: "operator", label: "Operator" },
+  { value: "partner", label: "Partner" },
   { value: "other", label: "Other" },
 ];
 
 const INTENTS = [
-  { value: "exploring", label: "Exploring the platform" },
-  { value: "company_eval", label: "Evaluating for my company" },
-  { value: "investment", label: "Investment opportunity" },
-  { value: "partnership", label: "Partnership" },
-  { value: "curious", label: "Just curious" },
+  { value: "explore", label: "Explorar a plataforma" },
+  { value: "meeting", label: "Agendar conversa" },
+  { value: "pilot", label: "Avaliar piloto" },
+  { value: "funding", label: "Discutir investimento" },
+  { value: "other", label: "Outro" },
 ];
+
+function normalizeUserType(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  const aliases = {
+    founder: "founder",
+    investor: "investor",
+    operator: "operator",
+    enterprise: "operator",
+    developer: "operator",
+    partner: "partner",
+    other: "other",
+  };
+  return aliases[raw] || "";
+}
+
+function normalizeIntent(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  const aliases = {
+    explore: "explore",
+    exploring: "explore",
+    curious: "explore",
+    meeting: "meeting",
+    partnership: "meeting",
+    pilot: "pilot",
+    company_eval: "pilot",
+    funding: "funding",
+    investment: "funding",
+    other: "other",
+  };
+  return aliases[raw] || "";
+}
+
+function sanitizeOnboardingPayload(payload) {
+  return {
+    company: String(payload?.company || "").trim(),
+    role: String(payload?.role || payload?.profile_role || "").trim(),
+    user_type: normalizeUserType(payload?.user_type),
+    intent: normalizeIntent(payload?.intent),
+    notes: String(payload?.notes || "").trim(),
+  };
+}
+
 
 const ORKIO_ENV =
   typeof window !== "undefined" && window.__ORKIO_ENV__ ? window.__ORKIO_ENV__ : {};
@@ -130,13 +175,7 @@ const labelStyle = {
 };
 
 export default function OnboardingModal({ user, onComplete }) {
-  const [form, setForm] = useState({
-    company: user?.company || "",
-    role: user?.profile_role || "",
-    user_type: user?.user_type || "",
-    intent: user?.intent || "",
-    notes: user?.notes || "",
-  });
+  const [form, setForm] = useState(() => sanitizeOnboardingPayload(user));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
