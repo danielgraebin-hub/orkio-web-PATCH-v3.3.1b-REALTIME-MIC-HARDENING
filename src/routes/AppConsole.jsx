@@ -12,6 +12,18 @@ const SUMMIT_VOICE_MODE = ((ORKIO_ENV.VITE_SUMMIT_VOICE_MODE || import.meta.env.
   : "realtime";
 const SPEECH_RECOGNITION_LANG = ((ORKIO_ENV.VITE_SPEECH_RECOGNITION_LANG || import.meta.env.VITE_SPEECH_RECOGNITION_LANG || "en-US").trim() || "en-US");
 
+const REALTIME_IDLE_FOLLOWUP_ENABLED = ((ORKIO_ENV.VITE_REALTIME_IDLE_FOLLOWUP_ENABLED || import.meta.env.VITE_REALTIME_IDLE_FOLLOWUP_ENABLED || "true").toString().trim().toLowerCase() !== "false");
+const REALTIME_IDLE_FOLLOWUP_MS = Math.max(5000, Number(ORKIO_ENV.VITE_REALTIME_IDLE_FOLLOWUP_MS || import.meta.env.VITE_REALTIME_IDLE_FOLLOWUP_MS || 10000) || 10000);
+const REALTIME_REARM_AFTER_ASSISTANT_MS = Math.max(600, Number(ORKIO_ENV.VITE_REALTIME_RESTART_AFTER_TTS_MS || import.meta.env.VITE_REALTIME_RESTART_AFTER_TTS_MS || 1500) || 1500);
+
+function resolveRealtimeIdleDisplayName(userObj) {
+  const raw = (userObj?.name || userObj?.full_name || "").toString().trim();
+  if (!raw) return "";
+  const first = raw.split(/\s+/).filter(Boolean)[0] || raw;
+  return first.replace(/[^\p{L}\p{N}]/gu, "") || "";
+}
+
+
 
 // Icons (inline SVG)
 const IconPlus = () => (
@@ -235,6 +247,11 @@ React.useEffect(() => {
   const rtcAssistantFinalCommittedRef = useRef(false);
   const rtcResponseTimeoutRef = useRef(null);
   const rtcFallbackActiveRef = useRef(false);
+
+  const rtcIdleTimerRef = useRef(null);
+  const rtcIdlePromptedRef = useRef(false);
+  const rtcLastUserActivityRef = useRef(Date.now());
+  const rtcLastAssistantAtRef = useRef(0);
 
   // PATCH0100_27A: Realtime persistence (audit)
   const rtcSessionIdRef = useRef(null);
@@ -596,6 +613,7 @@ useEffect(() => {
     const msg = ((presetMsg ?? text) || "").trim();
     if (!msg || sending) return;
     setSending(true);
+    markRealtimeUserActivity();
 
     // STREAM-STAB: start new run and abort any previous stream
     streamRunRef.current += 1;
@@ -1033,6 +1051,7 @@ useEffect(() => {
       stopTts();
       setV2vPhase(null);
       setV2vError(null);
+      clearRealtimeIdleTimer();
       setUploadStatus('');
     }
   }
@@ -1099,6 +1118,75 @@ async function confirmFounderHandoff() {
     }
   }
 
+  function clearRealtimeIdleTimer() {
+    if (rtcIdleTimerRef.current) {
+      try { clearTimeout(rtcIdleTimerRef.current); } catch {}
+      rtcIdleTimerRef.current = null;
+    }
+  }
+
+  function markRealtimeUserActivity() {
+    rtcLastUserActivityRef.current = Date.now();
+    rtcIdlePromptedRef.current = false;
+    clearRealtimeIdleTimer();
+  }
+
+  function buildRealtimeIdleFollowupInstructions() {
+    const displayName = resolveRealtimeIdleDisplayName(user);
+    if (displayName) {
+      return `Em uma única frase curta, calorosa e natural em português do Brasil, pergunte se ${displayName} ainda está online. Não repita cumprimento anterior, não use listas e não acrescente explicações.`;
+    }
+    return "Em uma única frase curta, calorosa e natural em português do Brasil, pergunte se a pessoa ainda está online. Não repita cumprimento anterior, não use listas e não acrescente explicações.";
+  }
+
+  function scheduleRealtimeIdleFollowup(origin = "assistant_done") {
+    clearRealtimeIdleTimer();
+    if (!REALTIME_IDLE_FOLLOWUP_ENABLED) return;
+    if (!realtimeModeRef.current) return;
+    if (rtcFallbackActiveRef.current) return;
+    if (rtcIdlePromptedRef.current) return;
+    const dc = rtcDcRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    rtcIdleTimerRef.current = setTimeout(() => {
+      void triggerRealtimeIdleFollowup(origin);
+    }, REALTIME_IDLE_FOLLOWUP_MS);
+  }
+
+  async function triggerRealtimeIdleFollowup(origin = "idle_timeout") {
+    clearRealtimeIdleTimer();
+    if (!REALTIME_IDLE_FOLLOWUP_ENABLED) return;
+    if (!realtimeModeRef.current) return;
+    if (rtcFallbackActiveRef.current) return;
+    if (rtcIdlePromptedRef.current) return;
+    if (ttsPlaying || sending) return;
+    const dc = rtcDcRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    const idleMs = Date.now() - (rtcLastUserActivityRef.current || 0);
+    if (idleMs < REALTIME_IDLE_FOLLOWUP_MS - 500) return;
+
+    try {
+      rtcIdlePromptedRef.current = true;
+      clearRealtimeResponseTimeout();
+      clearRealtimeIdleTimer();
+    clearRealtimeIdleTimer();
+      dc.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          instructions: buildRealtimeIdleFollowupInstructions(),
+          output_modalities: ["audio", "text"],
+          audio: { output: { voice: rtcVoiceRef.current } }
+        }
+      }));
+      const displayName = resolveRealtimeIdleDisplayName(user);
+      setUploadStatus(displayName ? `${displayName}, sigo aqui caso queira continuar.` : "Sigo aqui caso queira continuar.");
+      setTimeout(() => setUploadStatus(""), 2200);
+    } catch (err) {
+      rtcIdlePromptedRef.current = false;
+      console.warn("[Realtime] idle follow-up failed", err);
+    }
+  }
+
+
   async function activateSilentRealtimeFallback(reason = "realtime_fallback") {
     if (rtcFallbackActiveRef.current) return;
     rtcFallbackActiveRef.current = true;
@@ -1137,6 +1225,7 @@ async function confirmFounderHandoff() {
   async function startRealtime() {
     try {
       setV2vError(null);
+      markRealtimeUserActivity();
       setV2vPhase('connecting');
       setUploadStatus('⚡ Conectando Realtime (WebRTC)...');
 
@@ -1256,6 +1345,7 @@ async function confirmFounderHandoff() {
           // only create a response when the user clicks, presses a hotkey, or speaks a magic word.
           if (ev?.type === 'conversation.item.input_audio_transcription.completed') {
             const raw = (ev?.transcript || ev?.text || ev?.result?.transcript || '').toString();
+            markRealtimeUserActivity();
             queueRealtimeEvent({ event_type: 'transcript.final', role: 'user', content: raw, is_final: true });
             try {} catch {}
             rtcLastFinalTranscriptRef.current = raw;
@@ -1288,6 +1378,7 @@ async function confirmFounderHandoff() {
           }
           if (ev?.type === 'response.created') {
             clearRealtimeResponseTimeout();
+            clearRealtimeIdleTimer();
             rtcTextBufRef.current = '';
             rtcAudioTranscriptBufRef.current = '';
             rtcLastAssistantFinalRef.current = '';
@@ -1321,6 +1412,16 @@ async function confirmFounderHandoff() {
             if (!rtcAssistantFinalCommittedRef.current) {
               commitRealtimeAssistantFinal(at, { source: 'response.audio_transcript' });
             }
+          }
+
+          if (ev?.type === 'response.audio.done' || ev?.type === 'response.done') {
+            clearRealtimeResponseTimeout();
+            rtcLastAssistantAtRef.current = Date.now();
+            setTimeout(() => {
+              if (realtimeModeRef.current && !rtcFallbackActiveRef.current) {
+                scheduleRealtimeIdleFollowup(ev?.type || 'response.done');
+              }
+            }, REALTIME_REARM_AFTER_ASSISTANT_MS);
           }
 
           if (ev?.type === 'error') {
@@ -1367,6 +1468,7 @@ async function confirmFounderHandoff() {
   
   function triggerRealtimeResponse(reason = "manual") {
     try {
+      markRealtimeUserActivity();
       const dc = rtcDcRef.current;
       if (!dc || dc.readyState !== "open") {
         throw new Error("DataChannel não está aberto");
@@ -1500,6 +1602,8 @@ async function confirmFounderHandoff() {
       }]));
     } catch {}
 
+    clearRealtimeIdleTimer();
+    rtcLastAssistantAtRef.current = Date.now();
     setUploadStatus('📝 ' + finalText.slice(0, 80) + (finalText.length > 80 ? '…' : ''));
     setTimeout(() => setUploadStatus(''), 2500);
   }
@@ -1738,6 +1842,9 @@ async function stopRealtime(reason = 'client_stop') {
           // Reiniciar microfone após fala (ciclo V2V)
           if (voiceModeRef.current && (speechSupported || mediaRecorderSupported) && !micEnabledRef.current) {
             startMic();
+          }
+          if (realtimeModeRef.current && !rtcFallbackActiveRef.current) {
+            setTimeout(() => scheduleRealtimeIdleFollowup('tts_end'), REALTIME_REARM_AFTER_ASSISTANT_MS);
           }
           resolve();
         };
